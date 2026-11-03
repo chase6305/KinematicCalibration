@@ -161,7 +161,6 @@ def run_perturbation_benchmark(
     before = _pose_error_statistics(nominal_poses, truth_poses)
     after = _pose_error_statistics(calibrated_poses, truth_poses)
     final_iteration = result.iteration_results[-1]
-    solver_statistics = final_iteration.get_statistics()
 
     return {
         "schema_version": 1,
@@ -187,9 +186,9 @@ def run_perturbation_benchmark(
         },
         "converged": bool(result.has_converged),
         "termination_reason": result.termination_reason,
-        "regressor_rank": int(solver_statistics["matrix_rank"]),
+        "regressor_rank": int(final_iteration.matrix_rank),
         "parameter_count": int(final_iteration.N_PARAMS),
-        "condition_number": float(solver_statistics["condition_number"]),
+        "condition_number": float(final_iteration.condition_number),
         "screw_axis_initial_errors": initial_axis_errors.tolist(),
         "screw_axis_final_errors": final_axis_errors.tolist(),
         "screw_axis_mean_improvement": _improvement(
