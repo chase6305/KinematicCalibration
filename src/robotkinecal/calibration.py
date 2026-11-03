@@ -926,18 +926,17 @@ class SerialRobotKineCal:
     def update_twist_definitions(
         self, param_corrections: np.ndarray, step_size: float = 1.0
     ):
-        """
-        Update the twist definitions of the joints such as to account for the error in the EE pose.
+        """Apply minimal spatial-axis and terminal-pose corrections (Eq. 29).
 
         Parameters
-        -----------
-        param_corrections: numpy.ndarray
-            The parameter corrections to apply to each joint that, together, account for the error in the EE pose.
-            The shape of the array is 4*N_JOINTS+OBS_SIZE x 1.
-        step_size: float
-            The step size to apply to the twist corrections during the optimization (default = 1.0).
+        ----------
+        param_corrections : array_like
+            Real array with 4*N_JOINTS+OBS_SIZE values, flattened before use.
+            Four parameters per joint precede the terminal correction: three
+            translation parameters for point observations, or six for poses.
+        step_size : float
+            Positive finite multiplier for all corrections (default: 1.0).
         """
-        # Verify that the shape of the array is correct
         param_corrections = _real_array(param_corrections, "param_corrections").reshape(
             -1
         )
@@ -945,43 +944,39 @@ class SerialRobotKineCal:
             raise ValueError("param_corrections contains non-finite values.")
         if param_corrections.shape != (4 * self.N_JOINTS + self.OBS_SIZE,):
             raise ValueError(
-                f"The shape of the parameter corrections array must be (4*N_JOINTS+OBS_SIZE, 1)=({4 * self.N_JOINTS + self.OBS_SIZE}, 1)."
+                "param_corrections must contain "
+                f"4*N_JOINTS+OBS_SIZE={4 * self.N_JOINTS + self.OBS_SIZE} values."
             )
 
-        # Verify that the step size is positive
         if not np.isfinite(step_size) or step_size <= 0:
             raise ValueError("The step size must be positive.")
-        param_corrections = step_size * param_corrections
+        corrections = step_size * param_corrections
+        bases = self.B_Matrix()
 
-        # Get the B matrix that maps the 4 parameters of each joint to a 6-dimensional twist
-        B_all = self.B_Matrix()
-
-        # Update the pose of the joints
-        for i in range(self.N_JOINTS):
-            B_i = B_all[6 * i : 6 * (i + 1), 4 * i : 4 * (i + 1)]
-            k_i = param_corrections[4 * i : 4 * (i + 1)].reshape(4)
-            # Eq 29 in Adjoint Error Model paper
-            # This produces a 6-dimensional twist correction from the 4 parameters
-            n_i = B_i @ k_i
-
-            # Update the screw axis of the joint
-            new_screw_axis_i = Twist3(n_i).SE3().Ad() @ self.joint_screw_axis[i]
-            self.joint_screw_axis[i] = new_screw_axis_i
+        for joint_index in range(self.N_JOINTS):
+            axis_basis = bases[
+                6 * joint_index : 6 * (joint_index + 1),
+                4 * joint_index : 4 * (joint_index + 1),
+            ]
+            axis_parameters = corrections[4 * joint_index : 4 * (joint_index + 1)]
+            # Map four parameters to a spatial twist; use the same correction
+            # for the screw axis and its optional physical zero-configuration pose.
+            correction_pose = Twist3(axis_basis @ axis_parameters).SE3()
+            self.joint_screw_axis[joint_index] = (
+                correction_pose.Ad() @ self.joint_screw_axis[joint_index]
+            )
 
             if self.joint_zero_conf_poses is not None:
-                # Update the pose of the joint when the robot is in the zero configuration
-                self.joint_zero_conf_poses[i] = (
-                    Twist3(n_i).SE3() @ self.joint_zero_conf_poses[i]
+                self.joint_zero_conf_poses[joint_index] = (
+                    correction_pose @ self.joint_zero_conf_poses[joint_index]
                 )
 
-        # Update the pose of the end effector
-        # Eq 29 in Adjoint Error Model paper
         if self.position_only:
-            self.zero_conf_EE_pose.t += param_corrections[-3:].reshape(3)
+            self.zero_conf_EE_pose.t += corrections[-3:]
         else:
-            k_st = param_corrections[-6:].reshape(6)
-            new_ee_pose = Twist3(k_st).SE3() @ self.zero_conf_EE_pose
-            self.zero_conf_EE_pose = new_ee_pose
+            self.zero_conf_EE_pose = (
+                Twist3(corrections[-6:]).SE3() @ self.zero_conf_EE_pose
+            )
 
     def B_Matrix(self):
         """
