@@ -69,3 +69,31 @@ c = (1 - theta/2 cot(theta/2)) / theta²
 只提供螺旋轴不能唯一确定 URDF 连杆坐标系，因此独立 POE 构造器
 不直接输出 URDF joint origin。需要通过提供该模型的 URDF 后端处理坐标系
 以及规范自由度，并验证导出前后 FK 一致。
+
+## 噪声底附近的小更新停止
+
+噪声观测的最小残差通常非零。回溯比较可能因浮点舍入拒绝所有缩步，
+即使模型已经只剩约 `1e-12` 的参数校正；这与仍有显著下降空间但搜索区间
+不合适的失败需要区别。
+
+`solve` 提供 `update_tolerance=1e-10` 和
+`relative_objective_tolerance=1e-8`。仅当回溯失败、先前至少存在一个已接受
+更新、当前提出的参数校正范数不超过 `update_tolerance`，且相邻线性化点
+平方目标的相对变化不超过 `relative_objective_tolerance` 时，报告
+`has_converged=True`、`termination_reason='small_update'`、
+`convergence_criterion='small_update_and_relative_objective_stall'`。
+`IterationResult` 记录 `proposed_parameter_update_norm`、
+`relative_objective_change`、`objective_scale`，原始未接受步长仍为零。
+参数坐标混合米和弧度，这些是数值停止指标，不能作为机器人精度验收。
+
+加权范数保留原数值供审计，停止比较则除以所有行权重中的最大值，
+避免共同改变权重单位而改变绝对停止阈值。相对位置/姿态权重保持不变。
+当 `damping=0` 时共同缩放权重不改变无正则最小二乘问题；
+`damping>0` 时共同缩放会改变数据项与正则项的相对强度，不承诺结果不变。
+
+该判据不把近似回归矩阵的梯度当作真实梯度。在 Python 3.12 的
+30 样本噪声案例中，失败点的校正范数为 `1.595e-12`，独立有限差分
+真实梯度范数仍为 `1.230e-6`；精确残差的 SciPy 继续优化仅改善约
+`4.284e-9` 的相对平方目标。这是显式数值停滞，不是真实梯度严格为零。
+对照中故意限制过大的搜索步长时，提出校正范数为 `0.03245`，
+仍可降低约 `99.96%` 的目标，继续保留 `line_search_failed`。

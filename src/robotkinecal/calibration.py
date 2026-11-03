@@ -79,6 +79,7 @@ class CalibrationResult:
         self.has_converged = False
         self.is_diverging = False
         self.termination_reason = None
+        self.convergence_criterion = None
         self.divergence_patience = divergence_patience
         self._consecutive_error_increases = 0
         self.nb_iterations_executed = 0
@@ -102,6 +103,7 @@ class CalibrationResult:
             post_update_twist_errors_norm: float | None = None,
             pre_update_objective_norm: float | None = None,
             post_update_objective_norm: float | None = None,
+            objective_scale: float = 1.0,
         ) -> None:
             """
             Initialize the iteration result.
@@ -148,6 +150,9 @@ class CalibrationResult:
                 else float(post_update_objective_norm)
             )
             self.position_errors = list(position_errors)
+            self.objective_scale = float(objective_scale)
+            self.proposed_parameter_update_norm = float(norm(twist_corrections))
+            self.relative_objective_change = None
             self.orientation_errors = list(orientation_errors)
 
             # Number of joints
@@ -238,6 +243,11 @@ class CalibrationResult:
             stats["singular_values"] = self.singular_values.copy()
             stats["pre_update_objective_norm"] = self.pre_update_objective_norm
             stats["post_update_objective_norm"] = self.post_update_objective_norm
+            stats["objective_scale"] = self.objective_scale
+            stats["proposed_parameter_update_norm"] = (
+                self.proposed_parameter_update_norm
+            )
+            stats["relative_objective_change"] = self.relative_objective_change
             return stats
 
         def print(self):
@@ -276,11 +286,26 @@ class CalibrationResult:
             previous_result = self.iteration_results[-2]
             current_result = self.iteration_results[-1]
 
-            current_objective = current_result.pre_update_objective_norm
-            previous_objective = previous_result.pre_update_objective_norm
+            current_objective = (
+                current_result.pre_update_objective_norm
+                / current_result.objective_scale
+            )
+            previous_objective = (
+                previous_result.pre_update_objective_norm
+                / previous_result.objective_scale
+            )
+            objective_maximum = max(current_objective, previous_objective)
+            current_result.relative_objective_change = (
+                0.0
+                if objective_maximum == 0.0
+                else abs(current_objective - previous_objective)
+                / objective_maximum
+                * ((current_objective + previous_objective) / objective_maximum)
+            )
             if abs(current_objective - previous_objective) < self.convergence_tolerance:
                 self.has_converged = True
                 self.termination_reason = "converged"
+                self.convergence_criterion = "objective_change"
             elif current_objective > previous_objective:
                 self._consecutive_error_increases += 1
                 if self._consecutive_error_increases >= self.divergence_patience:
@@ -1059,6 +1084,8 @@ class SerialRobotKineCal:
         damping: float = 0.0,
         backtracking: bool = True,
         min_step_size: float = 1e-4,
+        update_tolerance: float = 1e-10,
+        relative_objective_tolerance: float = 1e-8,
     ):
         """
         Solve the kinematic calibration problem via a iterative least squares method where at each iteration the screw axes are updated to minimize the error in the end effector pose. The process is stopped when the error has converged, when the error is increasing, or when the maximum number of iterations has been reached.
@@ -1085,6 +1112,13 @@ class SerialRobotKineCal:
             If True, halve the step until it reduces the residual (default = True).
         min_step_size: float
             Smallest step considered during backtracking (default = 1e-4).
+        update_tolerance: float
+            Maximum proposed parameter-correction norm for small-update stopping
+            after failed backtracking (default = 1e-10). Coordinates mix metres
+            and radians; this is not a physical accuracy bound.
+        relative_objective_tolerance: float
+            Maximum relative change in squared objective between consecutive
+            linearizations for small-update stopping (default = 1e-8).
         """
 
         if not self._observations:
@@ -1111,6 +1145,16 @@ class SerialRobotKineCal:
             raise ValueError("min_step_size must be a positive finite number.")
         if min_step_size > step_size:
             raise ValueError("min_step_size cannot be greater than step_size.")
+        for value, name in [
+            (update_tolerance, "update_tolerance"),
+            (relative_objective_tolerance, "relative_objective_tolerance"),
+        ]:
+            if (
+                isinstance(value, (bool, np.bool_))
+                or not np.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive finite number.")
 
         if self.position_only:
             if 3 * self.N_OBSERVATIONS < 4 * self.N_JOINTS + 3:
@@ -1121,19 +1165,18 @@ class SerialRobotKineCal:
 
         calibration_result = CalibrationResult(self.robot_model, joints=self.joints)
 
+        if self.position_only:
+            row_weights = np.full(self.OBS_SIZE * self.N_OBSERVATIONS, position_weight)
+        else:
+            observation_weights = np.array(
+                [position_weight] * 3 + [orientation_weight] * 3
+            )
+            row_weights = np.tile(observation_weights, self.N_OBSERVATIONS)
+        objective_scale = float(np.max(row_weights))
+
         # Iterative least squares
         for it in range(max_iterations):
             y_all, A_all, position_errors, orientation_errors = self._linearization()
-
-            if self.position_only:
-                row_weights = np.full(
-                    self.OBS_SIZE * self.N_OBSERVATIONS, position_weight
-                )
-            else:
-                observation_weights = np.array(
-                    [position_weight] * 3 + [orientation_weight] * 3
-                )
-                row_weights = np.tile(observation_weights, self.N_OBSERVATIONS)
             weighted_A_all = row_weights[:, None] * A_all
             weighted_y_all = row_weights[:, None] * y_all
 
@@ -1237,13 +1280,14 @@ class SerialRobotKineCal:
                 post_update_error_norm,
                 pre_update_objective_norm,
                 post_update_objective_norm,
+                objective_scale,
             )
             calibration_result.add_iteration_result(it_result)
 
             if line_search_failed:
                 calibration_result.is_diverging = False
                 if (
-                    pre_update_objective_norm
+                    pre_update_objective_norm / objective_scale
                     <= calibration_result.convergence_tolerance
                 ):
                     # At machine precision, no trial step may be measurably
@@ -1251,9 +1295,29 @@ class SerialRobotKineCal:
                     # search caused by floating-point noise.
                     calibration_result.has_converged = True
                     calibration_result.termination_reason = "converged"
+                    calibration_result.convergence_criterion = "residual_norm"
+                elif (
+                    len(calibration_result.iteration_results) > 1
+                    and any(
+                        previous.step_size > 0
+                        for previous in calibration_result.iteration_results[:-1]
+                    )
+                    and it_result.proposed_parameter_update_norm <= update_tolerance
+                    and it_result.relative_objective_change
+                    <= relative_objective_tolerance
+                ):
+                    # A noisy fixed point can propose a correction below
+                    # floating-point resolution. Keep this distinct from a
+                    # failed search with a substantial available update.
+                    calibration_result.has_converged = True
+                    calibration_result.termination_reason = "small_update"
+                    calibration_result.convergence_criterion = (
+                        "small_update_and_relative_objective_stall"
+                    )
                 else:
                     calibration_result.has_converged = False
                     calibration_result.termination_reason = "line_search_failed"
+                    calibration_result.convergence_criterion = None
 
             if self.verbose:
                 print(f"Iteration #{calibration_result.nb_iterations_executed} result:")

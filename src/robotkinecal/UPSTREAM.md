@@ -31,3 +31,9 @@ remain as independent references. Equivalence tests cover arbitrary axes,
 zero/pi angles, updates/reset, pose/point switching, and full optimization with
 a scalar substitute. Reproducible profiles and before/after results are recorded
 in `docs/performance.md` and `benchmarks/profile_solver.py`.
+
+Third-stage stopping distinguishes a small proposed update with a stalled
+relative objective from substantive backtracking failure. The explicit
+`small_update` termination records its criterion and metrics; common weight
+units are normalized only for stopping tolerances. See `docs/numerics.md` for
+the noisy Python 3.12 reproduction, finite-difference evidence, and controls.
