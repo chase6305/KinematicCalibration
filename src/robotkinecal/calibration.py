@@ -837,18 +837,21 @@ class SerialRobotKineCal:
 
     def forward_kinematics(self, link_index: int, joint_positions: np.ndarray):
         """
-        Compute the forward kinematics of the i-th link.
+        Compute a POE motion prefix or the complete end-effector pose.
 
         Parameters
         -----------
         link_index: int
-            The index of the link for which to compute the forward kinematics.
+            Zero returns identity; 1 through N_JOINTS apply that many joint
+            motions. N_JOINTS+1 also appends the end-effector home transform.
         joint_positions: numpy.ndarray
             The joint angles as a 1xN_JOINTS numpy array.
 
         Returns
         --------
-        The pose of the link_index-th link relative to the base frame as a spatialmath.SE3 object.
+        spatialmath.SE3
+            The requested motion product. Intermediate prefixes omit link home
+            transforms and therefore do not represent physical link frames.
         """
 
         # Verify that i is within the range of the number of joints
@@ -869,7 +872,7 @@ class SerialRobotKineCal:
         for i in range(min(link_index, self.N_JOINTS)):
             T *= Twist3(self.joint_screw_axis[i]).exp(joint_positions[i])
 
-        # If the user desire the pose of the end effector
+        # Only the terminal index includes the end-effector home transform.
         if link_index == self.N_JOINTS + 1:
             T *= self.zero_conf_EE_pose
 
@@ -990,8 +993,8 @@ class SerialRobotKineCal:
         4 parameters to a 6 dimensional twist.
         """
 
-        # NOTE: Since the definition of the B matrix is partly random
-        # we need to compute it only once and store it.
+        # Keep the chosen correction basis fixed while the fitted axes change.
+        # Reloading observations or resetting the model rebuilds this basis.
 
         # If the B matrix has already been computed, return it
         if self._B_Matrix is not None:
@@ -1033,6 +1036,7 @@ class SerialRobotKineCal:
         return B_all
 
     def Q_Matrix(self, joint_positions: np.ndarray):
+        """Return spatial motion blocks, shape (6, 6*N_JOINTS+OBS_SIZE)."""
 
         Q = np.ndarray((6, 6 * self.N_JOINTS + self.OBS_SIZE))
         prev_Ad = np.eye(6)
@@ -1049,7 +1053,7 @@ class SerialRobotKineCal:
         # Set Q_st according to Eq 25 of Adjoint Error Model paper
         Q[:, -self.OBS_SIZE :] = prev_Ad[:, : self.OBS_SIZE]
 
-        return Q  # A 6 x (6*N_JOINTS+6) matrix
+        return Q
 
     def A_Matrix(self, joint_positions: np.ndarray):
         """
@@ -1063,7 +1067,7 @@ class SerialRobotKineCal:
 
         Returns
         --------
-        The A matrix for the current observation as a numpy.ndarray of shape 6x6(N_JOINTS+1).
+        The A matrix for the current observation, shape (6, 4*N_JOINTS+OBS_SIZE).
         """
         Q = self.Q_Matrix(joint_positions)
         B = self.B_Matrix()
