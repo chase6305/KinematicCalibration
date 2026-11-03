@@ -79,8 +79,8 @@ def fit_dataset(
     ``calibrator`` is mutated by the upstream solver; create a fresh instance
     or call its ``reset()`` before fitting another dataset. For robot-body mode,
     Camera_T_Target inputs require both fixed transforms. Self-calibrating mode
-    estimates initial Camera/Base and EE/Target gauges from the nominal model
-    and observations, then fits the composite POE without an extrinsic prior.
+    estimates initial Camera_T_Base and EE_T_Target gauges from the nominal
+    model and observations, then fits the composite POE without an extrinsic prior.
     """
     from spatialmath import SE3
 

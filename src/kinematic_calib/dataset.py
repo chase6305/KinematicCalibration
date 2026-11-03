@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .io_utils import atomic_savez_compressed
+from .io_utils import atomic_savez_compressed, open_npz
 
 DATASET_SCHEMA_VERSION = 2
 
@@ -58,22 +58,26 @@ def validated_sample_indices(value, count: int, *, label="sample_indices") -> np
     return sample_indices
 
 
+def _schema_version_from_archive(data) -> int | None:
+    if "schema_version" not in data.files:
+        return None
+    schema_value = data["schema_version"]
+    if schema_value.shape != ():
+        raise ValueError("dataset schema_version must be a scalar")
+    try:
+        raw_schema_version = schema_value.item()
+        schema_version = int(raw_schema_version)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("dataset schema_version must be an integer") from exc
+    if isinstance(raw_schema_version, bool) or raw_schema_version != schema_version:
+        raise ValueError("dataset schema_version must be an integer")
+    return schema_version
+
+
 def read_dataset_schema_version(path: Path | str) -> int | None:
     """Return the declared schema, or ``None`` for a legacy archive."""
-    with np.load(path, allow_pickle=False) as data:
-        if "schema_version" not in data.files:
-            return None
-        schema_value = data["schema_version"]
-        if schema_value.shape != ():
-            raise ValueError("dataset schema_version must be a scalar")
-        try:
-            raw_schema_version = schema_value.item()
-            schema_version = int(raw_schema_version)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("dataset schema_version must be an integer") from exc
-        if isinstance(raw_schema_version, bool) or raw_schema_version != schema_version:
-            raise ValueError("dataset schema_version must be an integer")
-        return schema_version
+    with open_npz(path) as data:
+        return _schema_version_from_archive(data)
 
 
 class ObservationFrame(str, Enum):
@@ -216,10 +220,10 @@ class KinematicDataset:
     @classmethod
     def load(cls, path: Path | str) -> "KinematicDataset":
         """Load and validate a dataset from disk."""
-        schema_version = read_dataset_schema_version(path)
-        if schema_version not in (None, 1, DATASET_SCHEMA_VERSION):
-            raise ValueError(f"unsupported dataset schema version: {schema_version}")
-        with np.load(path, allow_pickle=False) as data:
+        with open_npz(path) as data:
+            schema_version = _schema_version_from_archive(data)
+            if schema_version not in (None, 1, DATASET_SCHEMA_VERSION):
+                raise ValueError(f"unsupported dataset schema version: {schema_version}")
             required = {"joint_positions", "observed_poses", "observation_frame"}
             missing = required.difference(data.files)
             if missing:

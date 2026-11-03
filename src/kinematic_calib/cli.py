@@ -29,6 +29,7 @@ from .io_utils import (
     atomic_write_json,
     atomic_write_pair,
     atomic_write_text,
+    open_npz,
 )
 from .io_utils import refuse_input_output_aliases as _refuse_input_output_aliases
 from .quality import evaluate_solution_quality as _evaluate_solution_quality
@@ -1765,7 +1766,7 @@ def _verify_result(args: argparse.Namespace) -> int:
     if args.parameters is not None:
         from .validation import validate_saved_poe_parameters
 
-        with np.load(args.parameters, allow_pickle=False) as archive:
+        with open_npz(args.parameters) as archive:
             required = {
                 "schema_version",
                 "parameter_type",
@@ -2447,7 +2448,7 @@ def _validate_result(args: argparse.Namespace) -> int:
         raise ValueError(
             "validation coverage thresholds must be finite and non-negative"
         )
-    with np.load(args.parameters, allow_pickle=False) as archive:
+    with open_npz(args.parameters) as archive:
         required = {"screw_axes", "zero_configuration_pose", "model_mode"}
         missing = required.difference(archive.files)
         if missing:

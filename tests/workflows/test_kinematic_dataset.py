@@ -3,11 +3,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from kinematic_calib.cli import main
 from kinematic_calib.dataset import (
     KinematicDataset,
     ObservationFrame,
     camera_target_to_base_ee,
     minimum_full_pose_samples,
+    read_dataset_schema_version,
 )
 
 
@@ -61,18 +63,98 @@ def test_dataset_rejects_unknown_schema_version(tmp_path: Path) -> None:
         KinematicDataset.load(path)
 
 
-def test_dataset_loads_legacy_archive_without_sample_indices(tmp_path: Path) -> None:
-    path = tmp_path / "legacy.npz"
+@pytest.mark.parametrize("schema_version", [None, 1, 2], ids=["legacy", "v1", "v2"])
+def test_dataset_loads_supported_schemas_without_sample_indices(
+    tmp_path: Path, schema_version: int | None
+) -> None:
+    path = tmp_path / "observations.npz"
+    metadata = (
+        {} if schema_version is None else {"schema_version": np.asarray(schema_version)}
+    )
     np.savez_compressed(
         path,
         joint_positions=np.zeros((2, 1)),
         observed_poses=np.repeat(np.eye(4)[None], 2, axis=0),
         observation_frame=np.asarray("camera_T_target"),
+        **metadata,
     )
+    original = path.read_bytes()
 
+    assert read_dataset_schema_version(path) == schema_version
     loaded = KinematicDataset.load(path)
 
     np.testing.assert_array_equal(loaded.sample_indices, [0, 1])
+    assert loaded.observation_frame == ObservationFrame.CAMERA_T_TARGET
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("entrypoint", ["schema", "dataset", "inspect"])
+@pytest.mark.parametrize(
+    "case", ["raw_npy", "empty", "truncated", "bad_crc", "positive_inf", "negative_inf"]
+)
+def test_invalid_dataset_reports_input_error_without_modifying_source(
+    tmp_path: Path, caplog, capsys, case: str, entrypoint: str
+) -> None:
+    path = tmp_path / f"{case}.npz"
+    if case == "raw_npy":
+        with path.open("wb") as stream:
+            np.save(stream, np.zeros((2, 1)), allow_pickle=False)
+    elif case == "empty":
+        path.write_bytes(b"")
+    elif case == "truncated":
+        path.write_bytes(b"PK\x03\x04")
+    elif case == "bad_crc":
+        np.savez(path, schema_version=np.asarray(2))
+        content = bytearray(path.read_bytes())
+        # Alter stored array bytes while retaining the original ZIP checksum.
+        content[content.index(b"\x93NUMPY") + 6] ^= 1
+        path.write_bytes(content)
+    else:
+        np.savez_compressed(
+            path,
+            schema_version=np.asarray(np.inf if case == "positive_inf" else -np.inf),
+        )
+    original = path.read_bytes()
+
+    try:
+        if entrypoint == "inspect":
+            assert main(["inspect", "--dataset", str(path)]) == 2
+            captured = capsys.readouterr()
+            assert captured.out == ""
+            message = caplog.text + captured.err
+            assert "Traceback" not in message
+        else:
+            reader = (
+                read_dataset_schema_version
+                if entrypoint == "schema"
+                else KinematicDataset.load
+            )
+            with pytest.raises(ValueError) as error:
+                reader(path)
+            message = str(error.value)
+
+        if case in {"positive_inf", "negative_inf"}:
+            assert "dataset schema_version must be an integer" in message
+        else:
+            assert "NPZ" in message
+            assert str(path) in message
+            if case == "bad_crc":
+                assert "CRC" in message
+    finally:
+        assert path.read_bytes() == original
+
+
+def test_empty_npz_retains_legacy_schema_and_missing_fields_diagnostic(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "empty_archive.npz"
+    np.savez_compressed(path)
+    original = path.read_bytes()
+
+    assert read_dataset_schema_version(path) is None
+    with pytest.raises(ValueError, match="dataset is missing fields"):
+        KinematicDataset.load(path)
+    assert path.read_bytes() == original
 
 
 def test_camera_target_conversion_uses_both_extrinsics() -> None:

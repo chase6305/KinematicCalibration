@@ -6,10 +6,11 @@ This module is loaded only when the OpenCV backend is requested.
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from zipfile import BadZipFile
 
 import cv2 as cv
 import numpy as np
+
+from kinematic_calib import io_utils
 
 OPENCV_ROBOT_WORLD_METHODS = {
     "shah": cv.CALIB_ROBOT_WORLD_HAND_EYE_SHAH,
@@ -24,7 +25,11 @@ def opencv_calibration_implementation_sha256() -> str:
     """Fingerprint the OpenCV solver and artifact-contract implementation."""
     digest = hashlib.sha256()
     directory = Path(__file__).resolve().parent
-    for path in (directory / "opencv.py", directory.parent / "handeye_cli.py"):
+    for path in (
+        directory / "opencv.py",
+        directory.parent / "handeye_cli.py",
+        Path(io_utils.__file__),
+    ):
         digest.update(path.name.encode("utf-8"))
         digest.update(b"\0")
         digest.update(path.read_bytes())
@@ -78,13 +83,7 @@ def handeye_observations_sha256(
 
 def load_opencv_observations(path: Path | str) -> OpenCVObservationArchive:
     """Load and validate a schema-tagged eye-to-hand observation NPZ."""
-    try:
-        archive = np.load(path, allow_pickle=False)
-    except (EOFError, ValueError, BadZipFile) as exc:
-        raise ValueError(f"invalid hand-eye observation NPZ {path}: {exc}") from exc
-    if not isinstance(archive, np.lib.npyio.NpzFile):
-        raise ValueError(f"hand-eye observation input must be an NPZ archive: {path}")
-    with archive:
+    with io_utils.open_npz(path) as archive:
         required = {
             "schema_version",
             "archive_type",

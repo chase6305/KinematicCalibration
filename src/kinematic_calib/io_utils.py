@@ -1,13 +1,31 @@
-"""Crash-safe output helpers for calibration artifacts."""
+"""NumPy archive reads and staged publication of calibration artifacts."""
 
 import json
 import os
 import shutil
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
+from zipfile import BadZipFile
 
 import numpy as np
+
+
+@contextmanager
+def open_npz(path: Path | str) -> Iterator[np.lib.npyio.NpzFile]:
+    """Open a pickle-free NPZ and report decoding failures with its path."""
+    try:
+        archive = np.load(path, allow_pickle=False)
+    except (EOFError, ValueError, BadZipFile) as exc:
+        raise ValueError(f"invalid NPZ archive {path}: {exc}") from exc
+    if not isinstance(archive, np.lib.npyio.NpzFile):
+        raise ValueError(f"expected an NPZ archive: {path}")
+    with archive:
+        try:
+            yield archive
+        except (EOFError, BadZipFile) as exc:
+            raise ValueError(f"invalid NPZ archive {path}: {exc}") from exc
 
 
 def refuse_input_output_aliases(
