@@ -14,6 +14,7 @@ from kinematic_calib.dataset import (
     sample_sha256,
 )
 from kinematic_calib.saved_model import load_fitted_model
+from kinematic_calib.validation import predict_saved_poe
 
 from .numpy import NumpyBackend
 from .playback import PoseState
@@ -82,8 +83,6 @@ class MeasuredPlayback:
         base_t_camera=None,
         ee_t_target=None,
     ):
-        from robotkinecal import SerialRobotKineCal
-
         fitted = load_fitted_model(parameters, urdf, result_path=result)
         source = KinematicDataset.load(dataset)
         self.nominal = NumpyBackend.from_urdf(
@@ -147,12 +146,13 @@ class MeasuredPlayback:
             coordinate_frame = "base"
 
         self.dataset = displayed
-        self.fitted = SerialRobotKineCal.from_screw_axes(
-            fitted.screw_axes, fitted.zero_pose, joint_names=self.nominal.joint_names
-        )
+        self._fitted_axes = fitted.screw_axes
+        self._fitted_home = fitted.zero_pose
         configurations = self.dataset.joint_positions
         nominal = np.asarray([self._nominal_pose(row) for row in configurations])
-        calibrated = self.fitted.forward_kinematics_batch(configurations)
+        calibrated = predict_saved_poe(
+            self._fitted_axes, self._fitted_home, configurations
+        )
         self.model = {
             "nominal_predictions": nominal,
             "calibrated_predictions": calibrated,
@@ -197,7 +197,9 @@ class MeasuredPlayback:
         }
         poses = {
             "nominal": links[self.nominal.end_link] @ self._nominal_target,
-            "calibrated": self.fitted.forward_kinematics_batch(positions[None])[0],
+            "calibrated": predict_saved_poe(
+                self._fitted_axes, self._fitted_home, positions[None]
+            )[0],
         }
         measured = None if index is None else self.dataset.observed_poses[index].copy()
         position_error = orientation_error = None

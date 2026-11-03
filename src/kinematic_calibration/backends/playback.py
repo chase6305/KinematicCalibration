@@ -7,6 +7,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from kinematic_calib.dataset import KinematicDataset
+from kinematic_calib.validation import predict_saved_poe
 
 from ..artifacts import load_experiment_bundle
 from .numpy import NumpyBackend
@@ -37,8 +38,6 @@ class ExperimentPlayback:
         if not isinstance(split, str) or split not in ("validation", "training"):
             raise ValueError("split must be 'validation' or 'training'")
 
-        from robotkinecal import SerialRobotKineCal
-
         self.path = Path(path)
         self.split = split
         self.source_sample_indices = None
@@ -50,7 +49,7 @@ class ExperimentPlayback:
         )
         self.truth = self.nominal.perturbed(seed=self.report["truth_seed"])
         if split == "training":
-            from ..experiment import pose_metrics, predict_poe
+            from ..experiment import pose_metrics
 
             # Verify the complete bundle before selecting archived training rows.
             self.dataset = KinematicDataset.load(self.path / "train.npz")
@@ -70,7 +69,7 @@ class ExperimentPlayback:
                 ("truth", self.truth.poe_parameters()),
                 ("calibrated", (self.model["screw_axes"], self.model["home"])),
             ):
-                self.model[f"{name}_predictions"] = predict_poe(axes, home, joints)
+                self.model[f"{name}_predictions"] = predict_saved_poe(axes, home, joints)
             self.report["data_role"] = "training"
             for key, predicted, observed in (
                 (
@@ -101,11 +100,8 @@ class ExperimentPlayback:
             ):
                 if key in self.report:
                     self.report[key] = pose_metrics(predicted, observed)
-        self.fitted = SerialRobotKineCal.from_screw_axes(
-            self.model["screw_axes"],
-            self.model["home"],
-            joint_names=self.nominal.joint_names,
-        )
+        self._fitted_axes = self.model["screw_axes"].copy()
+        self._fitted_home = self.model["home"].copy()
 
     def _state(self, q, *, index: int | None) -> PoseState:
         raw = np.asarray(q)
@@ -126,7 +122,9 @@ class ExperimentPlayback:
         poses = {
             "nominal": links["nominal"][self.nominal.end_link],
             "truth": links["truth"][self.truth.end_link],
-            "calibrated": self.fitted.forward_kinematics_batch(q[None])[0],
+            "calibrated": predict_saved_poe(
+                self._fitted_axes, self._fitted_home, q[None]
+            )[0],
         }
         measured = None if index is None else self.dataset.observed_poses[index].copy()
         reference = poses["truth"] if measured is None else measured
