@@ -103,18 +103,14 @@ def camera_target_to_base_ee(
         "base_T_camera", np.asarray(base_t_camera)[None]
     )[0]
     target_t_ee = invert_transform(ee_t_target)
-    converted = np.asarray(
-        [base_t_camera @ observation @ target_t_ee for observation in observations]
-    )
-    # Re-project composed rotations onto SO(3).  This only removes floating
-    # point drift (typically 1e-15), but avoids downstream libraries rejecting
-    # valid near-pi rotations with machine-epsilon-level strict checks.
-    for pose in converted:
-        u, _, vt = np.linalg.svd(pose[:3, :3])
-        correction = np.eye(3)
-        correction[2, 2] = np.linalg.det(u @ vt)
-        pose[:3, :3] = u @ correction @ vt
-        pose[3] = [0.0, 0.0, 0.0, 1.0]
+    converted = base_t_camera @ observations @ target_t_ee
+    # Project rotations within the accepted rigid-transform tolerance onto
+    # SO(3), so strict downstream checks also accept compositions near pi.
+    left, _, right = np.linalg.svd(converted[:, :3, :3])
+    correction = np.repeat(np.eye(3)[None], len(converted), axis=0)
+    correction[:, 2, 2] = np.linalg.det(left @ right)
+    converted[:, :3, :3] = left @ correction @ right
+    converted[:, 3] = [0.0, 0.0, 0.0, 1.0]
     return converted
 
 

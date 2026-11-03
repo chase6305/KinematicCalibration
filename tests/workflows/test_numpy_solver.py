@@ -163,6 +163,86 @@ def test_numpy_can_fit_a_selected_subchain_in_its_explicit_base_frame(
     assert report["joint_names"] == [f"Joint{index}" for index in range(2, 7)]
 
 
+@pytest.mark.parametrize(
+    "camera,base_link", [(False, None), (True, None), (False, "Link1")]
+)
+def test_unified_numpy_geometry_workflow_verifies_poe_without_urdf_export(
+    tmp_path, monkeypatch, camera, base_link
+):
+    monkeypatch.setitem(sys.modules, "roboticstoolbox", None)
+    _data(tmp_path, camera=camera, base_link=base_link)
+    output = tmp_path / "calibration"
+    arguments = [
+        "calibrate",
+        "--backend",
+        "numpy",
+        "--calibration-type",
+        "geometry",
+        "--dataset",
+        str(tmp_path / "train.npz"),
+        "--urdf",
+        str(example_urdf()),
+        "--output-dir",
+        str(output),
+        "--skip-handeye",
+    ]
+    if base_link is not None:
+        arguments.extend(["--base-link", base_link])
+    assert main(arguments) == 0
+    manifest = json.loads((output / "calibration_manifest.json").read_text())
+    assert manifest["accepted"] and manifest["backend"] == "numpy"
+    assert manifest["base_link"] == base_link
+    geometry = manifest["stages"]["geometry"]
+    assert geometry["verification_exit_code"] == 0
+    assert geometry["exported_urdf"] is None
+    assert "link frames" in geometry["export_skipped_reason"]
+    assert not list(output.glob("*.urdf"))
+    result = json.loads((output / "final_result.json").read_text())
+    assert result["kinematic_calibration"]["parameters"] == geometry["parameters"]
+    assert (
+        main(
+            [
+                "validate-result",
+                "--parameters",
+                geometry["parameters"],
+                "--dataset",
+                str(tmp_path / "validation.npz"),
+                "--output",
+                str(output / "validation.json"),
+            ]
+        )
+        == 0
+    )
+    validation = json.loads((output / "validation.json").read_text())
+    assert validation["independent_validation"]
+    assert validation["position_error_max_m"] < 1e-6
+
+
+@pytest.mark.parametrize("calibration_type", ["both", "zero-offset"])
+def test_numpy_unified_workflow_rejects_unsupported_stages_before_writing(
+    tmp_path, caplog, calibration_type
+):
+    output = tmp_path / "calibration"
+    assert (
+        main(
+            [
+                "calibrate",
+                "--backend",
+                "numpy",
+                "--calibration-type",
+                calibration_type,
+                "--dataset",
+                str(tmp_path / "missing.npz"),
+                "--output-dir",
+                str(output),
+            ]
+        )
+        == 2
+    )
+    assert "requires --calibration-type geometry" in caplog.text
+    assert not output.exists()
+
+
 def test_old_parser_keeps_rtb_as_its_explicit_compatibility_default():
     args = build_parser().parse_args(
         [

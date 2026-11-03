@@ -24,6 +24,24 @@ def _real_array(value, name):
     return np.asarray(raw, dtype=float)
 
 
+def _rank_from_singular_values(singular_values, matrix_shape):
+    """Match NumPy's default numerical rank without factoring the matrix again."""
+    tolerance = singular_values[0] * max(matrix_shape) * np.finfo(singular_values.dtype).eps
+    return int(np.count_nonzero(singular_values > tolerance))
+
+
+def _regressor_statistics(matrix):
+    """Derive rank, spectrum and 2-norm condition from a single SVD."""
+    singular_values = np.linalg.svd(matrix, compute_uv=False)
+    rank = _rank_from_singular_values(singular_values, matrix.shape)
+    condition = (
+        float(singular_values[0] / singular_values[-1])
+        if singular_values[-1] > 0
+        else float("inf")
+    )
+    return rank, singular_values, condition
+
+
 def _pose_log(pose):
     """SE(3) logarithm in [v, w] order, stable near zero and pi rotations.
 
@@ -104,6 +122,7 @@ class CalibrationResult:
             pre_update_objective_norm: float | None = None,
             post_update_objective_norm: float | None = None,
             objective_scale: float = 1.0,
+            row_weights: np.ndarray | None = None,
         ) -> None:
             """
             Initialize the iteration result.
@@ -111,19 +130,21 @@ class CalibrationResult:
             Parameters
             ----------
             joint_screw_definitions: list
-                List of 6D screw axes for each joint and the end-effector.
+                One base-frame 6D screw axis per joint, in [v, w] order.
             zero_conf_EE_pose: SE3
-                Pose of the EE when all joint positions are zero
+                Base_T_EE when all joint positions are zero.
             A_all: numpy.ndarray
-                The data matrix matrix build from stacked A matrices when considered all observations as a numpy.ndarray of shape OBS_SIZE*N_OBSERVATIONS x 4*N_JOINTS+OBS_SIZE.
+                Stacked observation regressor, with shape
+                (OBS_SIZE*N_OBSERVATIONS, 4*N_JOINTS+OBS_SIZE).
             twist_corrections: numpy.ndarray
-                A 4*N_JOINTS+OBS_SIZE x 1 vector containing the twist correction for each joint and for the end-effector. This is k in SerialRobotKineCal.solve.
+                Proposed parameter corrections with shape (4*N_JOINTS+OBS_SIZE, 1).
+                The applied corrections also include step_size.
             twist_errors: numpy.ndarray
-                Vector of length OBS_SIZE*N_OBSERVATIONS containing the twist errors for each joint and the end-effector. This is y_all in SerialRobotKineCal.solve.
+                Pre-update stacked residuals, shape (OBS_SIZE*N_OBSERVATIONS, 1).
             position_errors: List[float]
-                List of N_OBSERVATIONS containing the magnitude of the position difference between the observed and computed end-effector poses for each observation.
+                Pre-update Euclidean endpoint errors in metres, one per observation.
             orientation_errors: List[float]
-                List of N_OBSERVATIONS containing the magnitude of the orientation difference between the observed and computed end-effector poses for each observation.
+                Pre-update rotation-angle errors in radians, one per observation.
             """
             # Store a snapshot: the optimizer continues mutating its model after
             # this result has been created.
@@ -172,48 +193,84 @@ class CalibrationResult:
             self.position_only = self.OBS_SIZE == 3
 
             # Observability diagnostics for the linearized calibration problem.
-            self.matrix_rank = np.linalg.matrix_rank(self.A_all)
-            self.singular_values = np.linalg.svd(self.A_all, compute_uv=False)
-            self.condition_number = np.linalg.cond(self.A_all)
+            (
+                self.matrix_rank,
+                self.singular_values,
+                self.condition_number,
+            ) = _regressor_statistics(self.A_all)
+            self.row_weights = (
+                np.ones(self.A_all.shape[0])
+                if row_weights is None
+                else _real_array(row_weights, "row_weights").copy()
+            )
+            if self.row_weights.shape != (self.A_all.shape[0],) or not np.all(
+                np.isfinite(self.row_weights) & (self.row_weights > 0)
+            ):
+                raise ValueError(
+                    "row_weights must be a positive finite vector matching regressor rows."
+                )
+            self.weighted_A_all = self.row_weights[:, None] * self.A_all
+            self.weighted_twist_errors = self.row_weights[:, None] * self.twist_errors
+            if np.all(self.row_weights == 1.0):
+                self.weighted_matrix_rank = self.matrix_rank
+                self.weighted_singular_values = self.singular_values.copy()
+                self.weighted_condition_number = self.condition_number
+            else:
+                (
+                    self.weighted_matrix_rank,
+                    self.weighted_singular_values,
+                    self.weighted_condition_number,
+                ) = _regressor_statistics(self.weighted_A_all)
+            self.uncertainty_method = "local_linear_weighted_residual_heuristic"
 
         def compute_uncertainty_estimate(self, A_all, x_all, y_all):
             """
-            Compute the uncertainty estimate of the calibration.
+            Compute a local linear residual-based uncertainty heuristic.
+
+            This estimate does not model damping, nonlinear model error or
+            uncertainty in sample weights. Unidentifiable models return NaNs.
 
             Parameters
             -----------
             A_all: numpy.ndarray
-                The A matrix for all observations as a numpy.ndarray of shape OBS_SIZE*N_OBSERVATIONS x 4*N_JOINTS+OBS_SIZE.
+                Design matrix, including residual row weights when applicable.
+                Shape: (OBS_SIZE*N_OBSERVATIONS, 4*N_JOINTS+OBS_SIZE).
             x_all: numpy.ndarray
-                The twist corrections for all observations as a numpy.ndarray of shape 4*N_JOINTS+OBS_SIZE x 1.
+                Proposed parameter corrections, shape (4*N_JOINTS+OBS_SIZE, 1).
             y_all: numpy.ndarray
-                The twist errors for all observations as a numpy.ndarray of shape OBS_SIZE*N_OBSERVATIONS x 1.
+                Residual vector with the same row weights as A_all.
+                Shape: (OBS_SIZE*N_OBSERVATIONS, 1).
 
             Returns
             --------
-            A numpy.ndarray of shape N_JOINTS+1 containing the norm of the twist variance for each joint and the end-effector (a joint uncertainty estimate).
+            A vector of length N_JOINTS containing the norm of the four
+            parameter variances for each joint. Terminal-pose parameters
+            contribute to the fit but are not included in the returned vector.
             """
-            # Sum of squared residuals
-            residual = y_all - A_all @ x_all
-            SSR = float(np.sum(np.square(residual)))
-            # Statistical degrees of freedom
-            df = self.OBS_SIZE * self.N_OBSERVATIONS - self.N_PARAMS
-            if df <= 0 or np.linalg.matrix_rank(A_all) < self.N_PARAMS:
+            degrees_of_freedom = A_all.shape[0] - self.N_PARAMS
+            if degrees_of_freedom <= 0:
+                return np.full(self.N_JOINTS, np.nan)
+
+            _, singular_values, right_singular_vectors = np.linalg.svd(
+                A_all, full_matrices=False
+            )
+            if (
+                _rank_from_singular_values(singular_values, A_all.shape)
+                < self.N_PARAMS
+            ):
                 # A pseudoinverse of a singular information matrix gives zero
                 # variance along its null space, falsely implying certainty.
-                # Report unavailable uncertainty for an unidentifiable model.
                 return np.full(self.N_JOINTS, np.nan)
-            # Reduced chi-squared statistic
-            rcss = SSR / df
-            # Use a pseudoinverse so rank-deficient or ill-conditioned datasets
-            # produce a best-effort estimate instead of raising LinAlgError.
-            sigma = rcss * np.diag(np.linalg.pinv(A_all.T @ A_all))
-            # Twist variance norms
-            twist_variance_norms = np.linalg.norm(
-                sigma[: -self.OBS_SIZE].reshape((-1, 4)), axis=1
-            )
 
-            return twist_variance_norms
+            residual = y_all - A_all @ x_all
+            residual_variance = float(np.sum(residual**2)) / degrees_of_freedom
+            # Work from the design-matrix SVD instead of squaring its condition
+            # number in A.T @ A. Vh rows are the right singular vectors.
+            parameter_variances = residual_variance * np.sum(
+                (right_singular_vectors.T / singular_values) ** 2, axis=1
+            )
+            joint_variances = parameter_variances[: -self.OBS_SIZE].reshape(-1, 4)
+            return np.linalg.norm(joint_variances, axis=1)
 
         def get_statistics(self):
             """
@@ -236,7 +293,7 @@ class CalibrationResult:
             stats["orientation_errors_mean"] = np.mean(self.orientation_errors)
             stats["orientation_errors_max"] = np.max(self.orientation_errors)
             stats["joints_uncertainty"] = self.compute_uncertainty_estimate(
-                self.A_all, self.twist_corrections, self.twist_errors
+                self.weighted_A_all, self.twist_corrections, self.weighted_twist_errors
             )
             stats["matrix_rank"] = self.matrix_rank
             stats["condition_number"] = self.condition_number
@@ -248,6 +305,10 @@ class CalibrationResult:
                 self.proposed_parameter_update_norm
             )
             stats["relative_objective_change"] = self.relative_objective_change
+            stats["weighted_matrix_rank"] = self.weighted_matrix_rank
+            stats["weighted_singular_values"] = self.weighted_singular_values.copy()
+            stats["weighted_condition_number"] = self.weighted_condition_number
+            stats["uncertainty_method"] = self.uncertainty_method
             return stats
 
         def print(self):
@@ -1086,17 +1147,22 @@ class SerialRobotKineCal:
         min_step_size: float = 1e-4,
         update_tolerance: float = 1e-10,
         relative_objective_tolerance: float = 1e-8,
+        sample_weights=None,
     ):
         """
-        Solve the kinematic calibration problem via a iterative least squares method where at each iteration the screw axes are updated to minimize the error in the end effector pose. The process is stopped when the error has converged, when the error is increasing, or when the maximum number of iterations has been reached.
+        Fit joint screw axes and the terminal pose by iterative least squares.
+
+        Each iteration linearizes the weighted residuals and proposes parameter
+        corrections. Optional backtracking restores the preceding model when
+        a trial step increases the objective. Termination records convergence,
+        numerical stagnation, divergence, search failure or the iteration limit.
 
         Parameters
         -----------
         max_iterations: int
             The maximum number of iterations to perform.
-
         step_size: float
-            The step size to apply to the twist corrections during the optimization (default = 1.0).
+            Initial multiplier for each proposed parameter correction (default = 1.0).
         position_weight: float
             Weight applied to translational residuals (default = 1.0).
             For pose observations this weights the linear part of the spatial
@@ -1104,12 +1170,15 @@ class SerialRobotKineCal:
             an independent Euclidean endpoint-position weight. For point
             observations it weights Euclidean position residuals.
         orientation_weight: float
-            Weight applied to orientation residuals for pose observations (default = 1.0).
+            Residual multiplier for the three angular components of pose
+            observations (default = 1.0).
         damping: float
             Non-negative Tikhonov damping coefficient for the least-squares
             problem (default = 0.0).
         backtracking: bool
-            If True, halve the step until it reduces the residual (default = True).
+            If True, halve the step until the weighted residual norm does not
+            increase, or reject the update if all permitted steps fail
+            (default = True).
         min_step_size: float
             Smallest step considered during backtracking (default = 1e-4).
         update_tolerance: float
@@ -1119,6 +1188,13 @@ class SerialRobotKineCal:
         relative_objective_tolerance: float
             Maximum relative change in squared objective between consecutive
             linearizations for small-update stopping (default = 1e-8).
+        sample_weights: array_like | None
+            Strictly positive finite real residual multipliers of shape
+            ``(N_OBSERVATIONS,)``. Each value multiplies every residual row of
+            its observation, in addition to position/orientation weights.
+            Values are not squared-loss weights: pass sqrt(precision) when
+            precision is the desired squared-loss multiplier. Zeros and
+            implicit sample removal are rejected. Default: all ones.
         """
 
         if not self._observations:
@@ -1172,82 +1248,118 @@ class SerialRobotKineCal:
                 [position_weight] * 3 + [orientation_weight] * 3
             )
             row_weights = np.tile(observation_weights, self.N_OBSERVATIONS)
+        if sample_weights is not None:
+            sample_multipliers = _real_array(sample_weights, "sample_weights")
+            if sample_multipliers.shape != (self.N_OBSERVATIONS,) or not np.all(
+                np.isfinite(sample_multipliers) & (sample_multipliers > 0)
+            ):
+                raise ValueError(
+                    "sample_weights must be a positive finite vector "
+                    "of shape (N_OBSERVATIONS,)."
+                )
+            with np.errstate(over="ignore", under="ignore"):
+                row_weights *= np.repeat(sample_multipliers, self.OBS_SIZE)
+        if not np.all(np.isfinite(row_weights) & (row_weights > 0)):
+            raise ValueError(
+                "Combined residual weights must remain positive and finite."
+            )
         objective_scale = float(np.max(row_weights))
 
-        # Iterative least squares
-        for it in range(max_iterations):
-            y_all, A_all, position_errors, orientation_errors = self._linearization()
-            weighted_A_all = row_weights[:, None] * A_all
-            weighted_y_all = row_weights[:, None] * y_all
+        for _ in range(max_iterations):
+            residuals, regressor, position_errors, orientation_errors = (
+                self._linearization()
+            )
+            weighted_regressor = row_weights[:, None] * regressor
+            weighted_residuals = row_weights[:, None] * residuals
 
-            identifiable_parameters = np.array(range(self.N_PARAMS))
-            # Compute the column rank of A_all
-            A_rank = np.linalg.matrix_rank(weighted_A_all)
-            if A_rank < len(identifiable_parameters):
-                if self.position_only and len(identifiable_parameters) - A_rank == 2:
-                    # In this case, it is likely that the measurement point lie on the axis
-                    # of the last revolute joint. Consequently, the end-effector and last
-                    # joint poses are confounded.
+            identifiable_parameter_indices = np.array(range(self.N_PARAMS))
+            regressor_rank = np.linalg.matrix_rank(weighted_regressor)
+            if regressor_rank < len(identifiable_parameter_indices):
+                if (
+                    self.position_only
+                    and len(identifiable_parameter_indices) - regressor_rank == 2
+                ):
+                    # A point on the final revolute axis can confound the
+                    # terminal pose with the last joint's geometry.
                     print(
-                        "WARNING: Verify that the measurement point does not lie on the axis of the last revolute joint."
+                        "WARNING: Verify that the measurement point does not lie "
+                        "on the axis of the last revolute joint."
                     )
                 print(
-                    f"WARNING: Not all parameters are identifiable (rank of regressor is {A_rank}/{len(identifiable_parameters)}). You might be lacking diverse data."
+                    "WARNING: Not all parameters are identifiable "
+                    f"(rank of regressor is {regressor_rank}/"
+                    f"{len(identifiable_parameter_indices)}). "
+                    "You might be lacking diverse data."
                 )
 
-                # Iteratively detect and record parameters that contribute to the the rank (identifiable ones)
-                identifiable_parameters = []
-                for i in range(self.N_PARAMS):
+                # Keep columns in parameter order when they increase the rank.
+                identifiable_parameter_indices = []
+                for parameter_index in range(self.N_PARAMS):
                     if (
                         np.linalg.matrix_rank(
-                            weighted_A_all[:, identifiable_parameters + [i]]
+                            weighted_regressor[
+                                :, identifiable_parameter_indices + [parameter_index]
+                            ]
                         )
-                        == len(identifiable_parameters) + 1
+                        == len(identifiable_parameter_indices) + 1
                     ):
-                        identifiable_parameters.append(i)
+                        identifiable_parameter_indices.append(parameter_index)
                     else:
-                        joint_nb, param_nb = divmod(i, 4)
+                        joint_index, joint_parameter_index = divmod(parameter_index, 4)
                         print(
-                            f"Parameter {i} (joint {joint_nb + 1}, param {param_nb + 1}) is not identifiable."
+                            f"Parameter {parameter_index} (joint {joint_index + 1}, "
+                            f"param {joint_parameter_index + 1}) is not identifiable."
                         )
-                # Remove unidentifiable parameters from the A matrix
-                A_ident = weighted_A_all[:, identifiable_parameters]
-                A_rank = np.linalg.matrix_rank(A_ident)
-                if A_rank != len(identifiable_parameters):
+                identifiable_regressor = weighted_regressor[
+                    :, identifiable_parameter_indices
+                ]
+                regressor_rank = np.linalg.matrix_rank(identifiable_regressor)
+                if regressor_rank != len(identifiable_parameter_indices):
                     raise RuntimeError(
                         "Failed to isolate a full-rank set of identifiable parameters."
                     )
             else:
-                A_ident = weighted_A_all
+                identifiable_regressor = weighted_regressor
 
-            # Solve for the perturbation to the joint zero pose such that the EE error is accounted for
+            # Solve the weighted linearized problem, with optional damping.
             if damping > 0:
-                A_solve = np.vstack(
-                    [A_ident, np.sqrt(damping) * np.eye(A_ident.shape[1])]
+                solve_regressor = np.vstack(
+                    [
+                        identifiable_regressor,
+                        np.sqrt(damping) * np.eye(identifiable_regressor.shape[1]),
+                    ]
                 )
-                y_solve = np.vstack([weighted_y_all, np.zeros((A_ident.shape[1], 1))])
+                solve_residuals = np.vstack(
+                    [
+                        weighted_residuals,
+                        np.zeros((identifiable_regressor.shape[1], 1)),
+                    ]
+                )
             else:
-                A_solve = A_ident
-                y_solve = weighted_y_all
-            k = np.linalg.lstsq(A_solve, y_solve, rcond=1e-12)[0]
+                solve_regressor = identifiable_regressor
+                solve_residuals = weighted_residuals
+            parameter_corrections = np.linalg.lstsq(
+                solve_regressor, solve_residuals, rcond=1e-12
+            )[0]
 
-            # If some kinematic parameters were removed due to a rank deficiency
-            # we set them to zero here such that k_full is complete again.
-            k_full = np.zeros((self.N_PARAMS, 1))
-            for k_idx, k_full_idx in enumerate(identifiable_parameters):
-                k_full[k_full_idx] = k[k_idx]
-            k = k_full
+            # Restore the full parameter layout, leaving excluded columns at zero.
+            full_corrections = np.zeros((self.N_PARAMS, 1))
+            for reduced_index, parameter_index in enumerate(
+                identifiable_parameter_indices
+            ):
+                full_corrections[parameter_index] = parameter_corrections[reduced_index]
+            parameter_corrections = full_corrections
 
             # Update the model. With backtracking enabled, reject trial steps
             # that increase the residual and restore the exact previous state.
             model_before_update = self._model_snapshot()
-            pre_update_error_norm = norm(y_all)
-            pre_update_objective_norm = norm(weighted_y_all)
+            pre_update_error_norm = norm(residuals)
+            pre_update_objective_norm = norm(weighted_residuals)
             applied_step_size = step_size
             line_search_failed = False
             while True:
                 self._restore_model_snapshot(model_before_update)
-                self.update_twist_definitions(k, applied_step_size)
+                self.update_twist_definitions(parameter_corrections, applied_step_size)
                 post_update_errors = self._twist_error_vector()
                 post_update_error_norm = norm(post_update_errors)
                 post_update_objective_norm = norm(
@@ -1267,13 +1379,12 @@ class SerialRobotKineCal:
                     line_search_failed = True
                     break
 
-            # Store the results of the iteration
-            it_result = CalibrationResult.IterationResult(
+            iteration_result = CalibrationResult.IterationResult(
                 self.joint_screw_axis,
                 self.zero_conf_EE_pose,
-                A_all,
-                k,
-                y_all,
+                regressor,
+                parameter_corrections,
+                residuals,
                 position_errors,
                 orientation_errors,
                 applied_step_size,
@@ -1281,8 +1392,9 @@ class SerialRobotKineCal:
                 pre_update_objective_norm,
                 post_update_objective_norm,
                 objective_scale,
+                row_weights,
             )
-            calibration_result.add_iteration_result(it_result)
+            calibration_result.add_iteration_result(iteration_result)
 
             if line_search_failed:
                 calibration_result.is_diverging = False
@@ -1302,8 +1414,9 @@ class SerialRobotKineCal:
                         previous.step_size > 0
                         for previous in calibration_result.iteration_results[:-1]
                     )
-                    and it_result.proposed_parameter_update_norm <= update_tolerance
-                    and it_result.relative_objective_change
+                    and iteration_result.proposed_parameter_update_norm
+                    <= update_tolerance
+                    and iteration_result.relative_objective_change
                     <= relative_objective_tolerance
                 ):
                     # A noisy fixed point can propose a correction below
@@ -1321,7 +1434,7 @@ class SerialRobotKineCal:
 
             if self.verbose:
                 print(f"Iteration #{calibration_result.nb_iterations_executed} result:")
-                it_result.print()
+                iteration_result.print()
 
             if (
                 line_search_failed

@@ -187,11 +187,7 @@ def detect_toolkit_board(
         raise ValueError(
             "a single CCTag does not observe full orientation; use the toolkit point workflow with depth"
         )
-    if (
-        board.board_type == BoardType.CCTAG_MULTI
-        and board.legacy_artwork
-        and not allow_legacy_profile
-    ):
+    if board.is_cctag_multi and board.legacy_artwork and not allow_legacy_profile:
         raise ValueError(
             "legacy CCTag ring profile requires an explicitly verified detector; pass allow_legacy_profile=True only for a compatible detector build"
         )
@@ -236,7 +232,7 @@ def detect_toolkit_board(
     if hasattr(calibration, "DetectGridBoardPose"):
         kind = (
             calibration.BoardType.CCTAG
-            if board.board_type == BoardType.CCTAG_MULTI
+            if board.is_cctag_multi
             else calibration.BoardType.OPENCV_ACIRCLE
         )
         report = calibration.DetectGridBoardPose(
@@ -250,7 +246,7 @@ def detect_toolkit_board(
     else:
         detector = (
             calibration.EllipseDetectBoardPose
-            if board.board_type == BoardType.CCTAG_MULTI
+            if board.is_cctag_multi
             else calibration.DetectBoardPose
         )
         report = detector(image, depth_m, intrinsic, distortion, **options)

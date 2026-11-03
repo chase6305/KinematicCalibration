@@ -1209,7 +1209,25 @@ def _zero_offset(args: argparse.Namespace) -> int:
 
 
 def _calibrate(args: argparse.Namespace) -> int:
-    """Run the complete post-collection workflow with safe hand-eye fallback."""
+    """Run selected post-collection stages and verify their artifacts."""
+    backend = getattr(args, "backend", "rtb")
+    base_link = getattr(args, "base_link", None)
+    if backend == "numpy":
+        if args.calibration_type != "geometry":
+            raise ValueError(
+                "--backend numpy requires --calibration-type geometry; "
+                "zero-offset calibration requires the RTB adapter"
+            )
+        if any(
+            (
+                args.geometry_anchor_joint,
+                args.experimental_nominal_allocation,
+                args.experimental_svd_gauge_allocation,
+            )
+        ):
+            raise ValueError("URDF geometry allocation options require --backend rtb")
+    elif base_link is not None:
+        raise ValueError("--base-link requires --backend numpy")
     concise_output = args.output_detail == "concise" or args.quiet
     if args.urdf is None:
         from importlib.resources import files
@@ -1382,6 +1400,8 @@ def _calibrate(args: argparse.Namespace) -> int:
         "dataset": args.dataset,
         "urdf": args.urdf,
         "ee_name": args.ee_name,
+        "backend": backend,
+        "base_link": base_link,
         "model_mode": model_mode,
         "base_t_camera": base_t_camera_path if use_extrinsics else None,
         "ee_t_target": ee_t_target_path if use_extrinsics else None,
@@ -1398,6 +1418,7 @@ def _calibrate(args: argparse.Namespace) -> int:
     geometry_code = None
     exported_urdf = None
     export_code = None
+    export_skipped_reason = None
     if args.calibration_type in {"geometry", "both"}:
         geometry_code = invoke(
             _solve,
@@ -1429,7 +1450,12 @@ def _calibrate(args: argparse.Namespace) -> int:
             "calibrated" if model_mode == "robot-body" else "self_calibrated"
         )
         exported_urdf = args.output_dir / f"{args.urdf.stem}_{export_suffix}.urdf"
-        if geometry_code == 0 and verification_code == 0:
+        if backend == "numpy":
+            # A fitted space-POE model does not identify physical link frames.
+            export_skipped_reason = (
+                "NumPy POE fitting does not provide calibrated URDF link frames"
+            )
+        elif geometry_code == 0 and verification_code == 0:
             export_code = invoke(
                 _export_urdf,
                 argparse.Namespace(
@@ -1446,6 +1472,7 @@ def _calibrate(args: argparse.Namespace) -> int:
             "result": str(geometry_result),
             "verification_exit_code": verification_code,
             "exported_urdf": str(exported_urdf) if export_code == 0 else None,
+            "export_skipped_reason": export_skipped_reason,
         }
 
     zero_code = None
@@ -1503,6 +1530,8 @@ def _calibrate(args: argparse.Namespace) -> int:
         "urdf": str(args.urdf),
         "ee_name": args.ee_name,
         "calibration_type": args.calibration_type,
+        "backend": backend,
+        "base_link": base_link,
         "selected_model_mode": model_mode,
         "handeye": handeye,
         "stages": stages,
@@ -1538,6 +1567,8 @@ def _calibrate(args: argparse.Namespace) -> int:
                     "orientation_error_max_rad"
                 ),
                 "exported_urdf": stages["geometry"]["exported_urdf"],
+                "parameters": stages["geometry"]["parameters"],
+                "export_skipped_reason": stages["geometry"]["export_skipped_reason"],
             }
             if geometry_summary is not None
             else None
@@ -1578,134 +1609,11 @@ def _calibrate(args: argparse.Namespace) -> int:
             "handeye_calibration": handeye_result_summary,
         }
         if geometry_summary is not None:
-            definitions = geometry_summary.get("urdf_joint_definitions")
-            if definitions is None:
-                definitions = geometry_summary.get(
-                    "identifiable_urdf_joint_definitions", []
-                )
-            elif definitions and "name" in definitions[0]:
-                from scipy.spatial.transform import Rotation
+            from .reporting import summarize_geometry
 
-                root = ET.parse(args.urdf).getroot()
-                joints_by_relation = {}
-                revolute_index = 0
-                for joint_element in root.findall("joint"):
-                    parent = joint_element.find("parent")
-                    child = joint_element.find("child")
-                    if parent is None or child is None:
-                        continue
-                    relation = f"{parent.attrib.get('link')}-{child.attrib.get('link')}"
-                    joint_type = joint_element.attrib.get("type")
-                    index = revolute_index if joint_type == "revolute" else None
-                    if joint_type == "revolute":
-                        revolute_index += 1
-                    origin = joint_element.find("origin")
-                    nominal_xyz_text = (
-                        origin.attrib.get("xyz", "0 0 0")
-                        if origin is not None
-                        else "0 0 0"
-                    )
-                    nominal_xyz = np.fromstring(nominal_xyz_text, sep=" ")
-                    nominal_rpy_text = (
-                        origin.attrib.get("rpy", "0 0 0")
-                        if origin is not None
-                        else "0 0 0"
-                    )
-                    nominal_rpy = np.fromstring(nominal_rpy_text, sep=" ")
-                    axis_element = joint_element.find("axis")
-                    axis = (
-                        np.fromstring(
-                            axis_element.attrib.get("xyz", "1 0 0"), sep=" "
-                        ).tolist()
-                        if axis_element is not None
-                        else None
-                    )
-                    joints_by_relation[relation] = {
-                        "zero_based_index": index,
-                        "joint_name": joint_element.attrib.get("name"),
-                        "joint_type": joint_type,
-                        "axis": axis,
-                        "nominal_xyz": nominal_xyz,
-                        "nominal_rpy": nominal_rpy,
-                    }
-                normalized_definitions = []
-                for definition in definitions:
-                    relation = definition["name"]
-                    metadata = joints_by_relation.get(relation, {})
-                    xyz = np.asarray(definition["xyz"], dtype=float)
-                    rpy = np.asarray(definition["rpy"], dtype=float)
-                    nominal_xyz = metadata.get("nominal_xyz", np.zeros(3))
-                    nominal_rpy = metadata.get("nominal_rpy", np.zeros(3))
-                    nominal_rotation = Rotation.from_euler(
-                        "xyz", nominal_rpy
-                    ).as_matrix()
-                    calibrated_rotation = Rotation.from_euler("xyz", rpy).as_matrix()
-                    correction_rotation = nominal_rotation.T @ calibrated_rotation
-                    delta_xyz = nominal_rotation.T @ (xyz - nominal_xyz)
-                    delta_rpy = Rotation.from_matrix(correction_rotation).as_euler(
-                        "xyz"
-                    )
-                    normalized_definitions.append(
-                        {
-                            **{
-                                key: metadata.get(key)
-                                for key in (
-                                    "zero_based_index",
-                                    "joint_name",
-                                    "joint_type",
-                                    "axis",
-                                )
-                            },
-                            "xyz_m": xyz.tolist(),
-                            "rpy_rad": rpy.tolist(),
-                            "delta_xyz_m": delta_xyz.tolist(),
-                            "delta_rpy_rad": delta_rpy.tolist(),
-                        }
-                    )
-                definitions = normalized_definitions
-
-            def combine_joint_vectors(joint, translation_key, rotation_key):
-                translation = joint.get(translation_key)
-                rotation = joint.get(rotation_key)
-                if translation is None or rotation is None:
-                    return None
-                return [*translation, *rotation]
-
-            final_result["kinematic_calibration"] = {
-                "accepted": stages["geometry"]["accepted"],
-                "position_error_mean_m": geometry_summary.get("position_error_mean_m"),
-                "position_error_max_m": geometry_summary.get("position_error_max_m"),
-                "orientation_error_mean_rad": geometry_summary.get(
-                    "orientation_error_mean_rad"
-                ),
-                "orientation_error_max_rad": geometry_summary.get(
-                    "orientation_error_max_rad"
-                ),
-                "joint_names": [joint.get("joint_name") for joint in definitions],
-                "joint_indices": [
-                    joint.get("zero_based_index") for joint in definitions
-                ],
-                "joint_types": [joint.get("joint_type") for joint in definitions],
-                "xyz_rpy": [
-                    combine_joint_vectors(joint, "xyz_m", "rpy_rad")
-                    for joint in definitions
-                ],
-                "xyz_rpy_units": [
-                    "m",
-                    "m",
-                    "m",
-                    "rad",
-                    "rad",
-                    "rad",
-                ],
-                "axis": [joint.get("axis") for joint in definitions],
-                "delta_xyz_rpy": [
-                    combine_joint_vectors(joint, "delta_xyz_m", "delta_rpy_rad")
-                    for joint in definitions
-                ],
-                "postprocessing": geometry_summary.get("geometry_postprocessing"),
-                "urdf": stages["geometry"]["exported_urdf"],
-            }
+            final_result["kinematic_calibration"] = summarize_geometry(
+                geometry_summary, args.urdf, stages["geometry"]
+            )
         if zero_summary is not None:
             zero_joints = zero_summary.get("joints", [])
             final_result["zero_offset_calibration"] = {
@@ -1977,6 +1885,11 @@ def _verify_collection(args: argparse.Namespace) -> int:
     report = json.loads(args.report.read_text())
     if not isinstance(report, dict):
         raise ValueError("collection report JSON must contain an object")
+    if report.get("acquisition_type") == "offline-camera-board":
+        from kinematic_calibration.acquisition import verify_capture_report
+
+        print(json.dumps(verify_capture_report(args.dataset, args.report), indent=2))
+        return 0
     if report.get("schema_version") != 1:
         raise ValueError("unsupported collection report schema version")
     if report.get("report_type") != "ptpr-kinematic-collection":

@@ -85,6 +85,30 @@ def test_camera_target_conversion_uses_both_extrinsics() -> None:
     np.testing.assert_allclose(converted[0, :3, 3], [1.5, 2.0, 2.8])
 
 
+def test_batch_camera_conversion_preserves_frame_equation_near_pi() -> None:
+    from scipy.spatial.transform import Rotation
+
+    expected = np.repeat(np.eye(4)[None], 4, axis=0)
+    expected[:, :3, :3] = Rotation.from_rotvec(
+        [[0, 0, 0], [np.pi - 1e-10, 0, 0], [0, -np.pi, 0], [0.2, 0.3, -0.4]]
+    ).as_matrix()
+    expected[:, :3, 3] = np.arange(12).reshape(4, 3) / 10
+    base_t_camera = make_transform((0.3, -0.4, 0.2))
+    base_t_camera[:3, :3] = Rotation.from_euler("xyz", [0.4, -0.1, 0.5]).as_matrix()
+    ee_t_target = make_transform((0.05, 0.02, -0.1))
+    ee_t_target[:3, :3] = Rotation.from_euler("xyz", [-0.3, 0.2, 0.1]).as_matrix()
+    observed = np.linalg.inv(base_t_camera) @ expected @ ee_t_target
+    original = observed.copy()
+
+    recovered = camera_target_to_base_ee(observed, base_t_camera, ee_t_target)
+
+    np.testing.assert_allclose(recovered, expected, atol=2e-15)
+    np.testing.assert_allclose(
+        recovered @ ee_t_target, base_t_camera @ observed, atol=2e-15
+    )
+    np.testing.assert_array_equal(observed, original)
+
+
 def test_dataset_rejects_invalid_rotation() -> None:
     pose = np.eye(4)
     pose[0, 0] = 2.0

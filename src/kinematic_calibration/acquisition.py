@@ -472,4 +472,152 @@ def import_captures(
     return dataset, report
 
 
-__all__ = ["CaptureImportError", "import_captures"]
+def verify_capture_report(dataset_path: Path | str, report_path: Path | str) -> dict:
+    """Check a saved dataset against its import receipt without loading images.
+
+    This verifies the report's identities, poses and recorded quality decisions.
+    It does not re-detect source PNGs or verify the original capture manifest.
+    """
+    report = json.loads(Path(report_path).read_text())
+    if (
+        not isinstance(report, dict)
+        or type(report.get("schema_version")) is not int
+        or report["schema_version"] != 1
+        or report.get("acquisition_type") != "offline-camera-board"
+        or report.get("dataset_written") is not True
+    ):
+        raise ValueError("unsupported or unwritten offline capture report")
+    dataset_path = Path(dataset_path)
+    digest = hashlib.sha256(dataset_path.read_bytes()).hexdigest()
+    if report.get("dataset_sha256") != digest:
+        raise ValueError("capture report dataset SHA-256 mismatch")
+    dataset = KinematicDataset.load(dataset_path)
+    if (
+        dataset.observation_frame != ObservationFrame.CAMERA_T_TARGET
+        or report.get("observation_frame") != "camera_T_target"
+        or report.get("camera_convention") != "opencv-optical"
+        or report.get("joint_unit") != "rad"
+        or report.get("translation_unit") != "m"
+        or type(report.get("dof")) is not int
+        or report["dof"] != dataset.joint_positions.shape[1]
+        or report.get("joint_names") != list(dataset.joint_names or ())
+    ):
+        raise ValueError("capture report frame, units or joint identity mismatch")
+    if report.get("distortion") is None:
+        raise ValueError("capture report requires explicit distortion coefficients")
+    _camera_parameters(report.get("camera_matrix"), report["distortion"])
+    BoardType(report.get("board_type"))
+    points = np.asarray(report.get("board_points_m"))
+    if (
+        points.dtype.kind not in "iuf"
+        or points.ndim != 2
+        or points.shape[1] != 3
+        or len(points) < 4
+        or not np.isfinite(points).all()
+        or np.linalg.matrix_rank(points - points.mean(axis=0)) < 2
+    ):
+        raise ValueError(
+            "capture report board points must be finite noncollinear [N,3]"
+        )
+    max_sync = _number(report.get("max_sync_error_s"), "max_sync_error_s")
+    max_rms = _number(
+        report.get("max_reprojection_rms_px"), "max_reprojection_rms_px", positive=True
+    )
+    if max_sync < 0:
+        raise ValueError("max_sync_error_s must be nonnegative")
+    frames = report.get("frames")
+    if not isinstance(frames, list) or not frames:
+        raise ValueError("capture report frames must be a nonempty list")
+    seen, accepted_ids = set(), []
+    for frame in frames:
+        if not isinstance(frame, dict):
+            raise ValueError("capture report frame must be an object")
+        sample_id = _sample_id(frame.get("sample_id"))
+        if sample_id in seen:
+            raise ValueError("capture report sample IDs must be unique")
+        seen.add(sample_id)
+        joint_time = _number(frame.get("joint_timestamp_s"), "joint_timestamp_s")
+        image_time = _number(frame.get("image_timestamp_s"), "image_timestamp_s")
+        sync = _number(frame.get("sync_error_s"), "sync_error_s")
+        if sync < 0 or not np.isclose(
+            sync, abs(joint_time - image_time), rtol=1e-12, atol=1e-12
+        ):
+            raise ValueError("capture report sync error differs from its timestamps")
+        reasons = frame.get("rejection_reasons")
+        if (
+            type(frame.get("rejected")) is not bool
+            or frame.get("source") not in ("image", "image_points")
+            or not isinstance(reasons, list)
+            or any(not isinstance(reason, str) or not reason for reason in reasons)
+        ):
+            raise ValueError("capture report has invalid frame status")
+        if frame["rejected"]:
+            if frame.get("dataset_row") is not None or not reasons:
+                raise ValueError(
+                    "rejected capture frame must have reasons and no dataset row"
+                )
+            continue
+        row = len(accepted_ids)
+        if (
+            type(frame.get("dataset_row")) is not int
+            or frame["dataset_row"] != row
+            or row >= len(dataset.joint_positions)
+            or frame.get("detected") is not True
+            or frame.get("detection_attempted") is not True
+            or reasons
+            or sync < 0
+            or sync > max_sync
+        ):
+            raise ValueError(
+                "accepted capture frame has inconsistent row or quality status"
+            )
+        rms = _number(frame.get("reprojection_rms_px"), "reprojection_rms_px")
+        diagnostics = frame.get("pose_diagnostics", {})
+        if (
+            rms < 0
+            or rms > max_rms
+            or not isinstance(diagnostics, dict)
+            or diagnostics.get("ambiguous") is True
+        ):
+            raise ValueError(
+                "accepted capture frame violates its reprojection or ambiguity gate"
+            )
+        pose = _validate_transforms(
+            "camera_T_target", np.asarray(frame.get("camera_T_target"))[None]
+        )[0]
+        if not np.array_equal(pose, dataset.observed_poses[row]):
+            raise ValueError("capture report pose differs from the dataset observation")
+        if np.any((points @ pose[:3, :3].T + pose[:3, 3])[:, 2] <= 0):
+            raise ValueError("accepted capture frame has nonpositive optical depth")
+        accepted_ids.append(sample_id)
+    accepted, rejected = len(accepted_ids), len(frames) - len(accepted_ids)
+    for field, expected in (
+        ("total_samples", len(frames)),
+        ("accepted_samples", accepted),
+        ("rejected_samples", rejected),
+    ):
+        if type(report.get(field)) is not int or report[field] != expected:
+            raise ValueError(f"capture report {field} is inconsistent")
+    if (
+        report.get("all_samples_accepted") is not (rejected == 0)
+        or report.get("partial") is not (rejected > 0)
+        or type(report.get("allow_partial")) is not bool
+        or (rejected and not report["allow_partial"])
+        or not np.array_equal(dataset.sample_indices, accepted_ids)
+        or report.get("coverage") != dataset.get_summary()
+    ):
+        raise ValueError(
+            "capture report subset identity, acceptance or coverage mismatch"
+        )
+    return {
+        "integrity_verified": True,
+        "scope": "dataset_and_import_report",
+        "acquisition_type": "offline-camera-board",
+        "dataset_sha256": digest,
+        "total_samples": len(frames),
+        "accepted_samples": accepted,
+        "rejected_samples": rejected,
+    }
+
+
+__all__ = ["CaptureImportError", "import_captures", "verify_capture_report"]

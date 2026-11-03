@@ -300,21 +300,45 @@ def estimate_joint_zero_offsets(
     If fixed transforms are omitted, they are estimated as nuisance variables
     and the first and last offsets are fixed to zero to remove their exact
     gauge ambiguity with Camera_T_Base and EE_T_Target.
+
+    The fit minimizes spatial SE(3) twist residuals in [v, w] order. Reported
+    position errors are Euclidean endpoint distances in the observation frame;
+    they are distinct from the translation/rotation-coupled linear twist part.
     """
     from scipy.optimize import least_squares
     from scipy.spatial.transform import Rotation
-    from spatialmath import SE3
 
-    joints = np.asarray(joint_positions, dtype=float)
-    observed = np.asarray(observations, dtype=float)
+    from robotkinecal._batch import pose_log_batch
+
+    from .dataset import _validate_transforms
+
+    raw_joints = np.asarray(joint_positions)
+    if (
+        raw_joints.dtype.kind not in "iuf"
+        or raw_joints.ndim != 2
+        or min(raw_joints.shape) == 0
+        or not np.isfinite(raw_joints).all()
+    ):
+        raise ValueError("joint_positions must be a finite real non-empty [N, DOF] matrix")
+    joints = raw_joints.astype(float, copy=False)
+    observed = _validate_transforms("observations", np.asarray(observations))
+    if len(joints) != len(observed):
+        raise ValueError("joint and observation sample counts must match")
     dof = joints.shape[1]
     self_calibrating = camera_t_base is None and ee_t_target is None
     if (camera_t_base is None) != (ee_t_target is None):
         raise ValueError(
             "camera_t_base and ee_t_target must either both be provided or omitted"
         )
-    if max_offset_rad <= 0.0 or not np.isfinite(max_offset_rad):
+    raw_bound = np.asarray(max_offset_rad)
+    if (
+        raw_bound.ndim != 0
+        or raw_bound.dtype.kind not in "iuf"
+        or not np.isfinite(raw_bound)
+        or raw_bound <= 0
+    ):
         raise ValueError("max_offset_rad must be a positive finite value")
+    max_offset_rad = float(raw_bound)
 
     if self_calibrating:
         from robotkinecal import SerialRobotKineCal
@@ -326,8 +350,12 @@ def estimate_joint_zero_offsets(
         )
         estimated_indices = np.arange(1, max(dof - 1, 1), dtype=int)
     else:
-        camera_t_base = np.asarray(camera_t_base, dtype=float)
-        ee_t_target = np.asarray(ee_t_target, dtype=float)
+        camera_t_base = _validate_transforms(
+            "Camera_T_Base", np.asarray(camera_t_base)[None]
+        )[0]
+        ee_t_target = _validate_transforms(
+            "EE_T_Target", np.asarray(ee_t_target)[None]
+        )[0]
         initialization = None
         estimated_indices = np.arange(dof, dtype=int)
 
@@ -376,32 +404,59 @@ def estimate_joint_zero_offsets(
             offsets[estimated_indices] = parameters
         return current_camera_t_base, current_ee_t_target, offsets
 
-    def residual(parameters):
+    def predict_poses(parameters):
         current_camera_t_base, current_ee_t_target, offsets = unpack(parameters)
-        values = []
-        for measured, q in zip(observed, joints, strict=True):
-            base_t_ee = robot.fkine(q + offsets, end=ee_name).A
-            predicted = current_camera_t_base @ base_t_ee @ current_ee_t_target
-            values.extend((SE3(measured) @ SE3(predicted).inv()).log(twist=True))
-        return np.asarray(values)
+        base_t_ee = np.asarray(
+            [
+                robot.fkine(configuration + offsets, end=ee_name).A
+                for configuration in joints
+            ]
+        )
+        return current_camera_t_base @ base_t_ee @ current_ee_t_target
+
+    def residual(parameters):
+        predicted = predict_poses(parameters)
+        relative_rotations = observed[:, :3, :3] @ predicted[:, :3, :3].transpose(
+            0, 2, 1
+        )
+        relative_translations = observed[:, :3, 3] - np.einsum(
+            "nij,nj->ni", relative_rotations, predicted[:, :3, 3]
+        )
+        return pose_log_batch(relative_rotations, relative_translations).reshape(-1)
 
     result = least_squares(residual, initial, bounds=(lower, upper), method="trf")
     if not result.success:
         raise ValueError(f"joint zero-offset solve failed: {result.message}")
     final_camera_t_base, final_ee_t_target, offsets = unpack(result.x)
-    residuals = residual(result.x).reshape(-1, 6)
-    position_errors = np.linalg.norm(residuals[:, :3], axis=1)
-    orientation_errors = np.linalg.norm(residuals[:, 3:], axis=1)
-    singular_values = np.linalg.svd(result.jac, compute_uv=False)
-    rank = int(np.linalg.matrix_rank(result.jac))
-    condition_number = float(np.linalg.cond(result.jac))
+    predicted = predict_poses(result.x)
+    position_errors = np.linalg.norm(observed[:, :3, 3] - predicted[:, :3, 3], axis=1)
+    relative_rotations = observed[:, :3, :3] @ predicted[:, :3, :3].transpose(0, 2, 1)
+    orientation_errors = Rotation.from_matrix(relative_rotations).magnitude()
+
+    _, singular_values, right_singular_vectors = np.linalg.svd(
+        result.jac, full_matrices=False
+    )
+    rank_tolerance = (
+        singular_values[0]
+        * max(result.jac.shape)
+        * np.finfo(singular_values.dtype).eps
+    )
+    rank = int(np.count_nonzero(singular_values > rank_tolerance))
+    condition_number = (
+        float(singular_values[0] / singular_values[-1])
+        if singular_values[-1] > 0
+        else float("inf")
+    )
     residual_degrees_of_freedom = int(result.jac.shape[0] - rank)
     if residual_degrees_of_freedom > 0 and rank == result.jac.shape[1]:
         residual_variance = float(
             np.dot(result.fun, result.fun) / residual_degrees_of_freedom
         )
-        covariance = residual_variance * np.linalg.pinv(result.jac.T @ result.jac)
-        parameter_std = np.sqrt(np.maximum(np.diag(covariance), 0.0))
+        # Avoid squaring the Jacobian's condition number through J.T @ J.
+        parameter_variances = residual_variance * np.sum(
+            (right_singular_vectors.T / singular_values) ** 2, axis=1
+        )
+        parameter_std = np.sqrt(np.maximum(parameter_variances, 0.0))
     else:
         residual_variance = float("nan")
         parameter_std = np.full(result.jac.shape[1], np.nan)

@@ -37,3 +37,9 @@ relative objective from substantive backtracking failure. The explicit
 `small_update` termination records its criterion and metrics; common weight
 units are normalized only for stopping tolerances. See `docs/numerics.md` for
 the noisy Python 3.12 reproduction, finite-difference evidence, and controls.
+
+Per-observation `sample_weights` are positive finite residual multipliers and
+combine with position/orientation multipliers throughout the solver. Raw result
+fields remain available alongside weighted rank/spectrum/condition diagnostics.
+Uncertainty uses the weighted design-matrix SVD, is explicitly a local-linear
+heuristic, and is unavailable for an effectively rank-deficient problem.

@@ -9,6 +9,8 @@
 
 `kinematic_calib.service.fit_dataset` 负责数据帧选择、初始化和拟合。它不持有仿真器、不
 启动服务器、不写文件。CLI 负责编排工件、来源记录和显式验收；新后端也复用同一服务。
+统一 `calibrate` 入口可选择 NumPy 的 geometry-only POE 路线，复用相同拟合与工件复核，
+并明确跳过 URDF 导出。固定 link frame 的导出与零偏旧流程继续由可选 RTB 适配器提供。
 
 ## 后端
 
@@ -16,6 +18,10 @@
 `forward(q)` 和 `link_transforms(q)`。引擎的输出使用相同的米/弧度和 A_T_B 约定。
 NumPy 后端读取指定 URDF 路径，忽略 mesh，不执行物理与碰撞计算。Viser 是独立观察者，
 展示名义/真值骨架和标定后的端点预测；板贴在显示用真值 EE 坐标，未声称恢复全部关节框架。
+
+`planning.select_informative_poses` 负责模型信息量选姿；`routing.plan_visit_order` 仅消费关节
+配置并缩短访问距离，不依赖模型、传感器或求解器。`save_pose_plan` 编排两步，保留候选身份
+和选姿/访问索引映射。重排不改变所选姿态集合，因此不改变回归矩阵的秩与奇异值谱。
 
 基础包依赖 NumPy、SciPy、SpatialMath。OpenCV、Viser、RTB 和原生工具包分别位于边界，
 模块导入不触发下载、构建或 GPU 初始化。新增 MuJoCo / PyBullet / 实机控制器时，应实现

@@ -13,6 +13,7 @@ import tempfile
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import numpy as np
 
@@ -37,7 +38,11 @@ from .experiment import (
 )
 from .handeye import _pose_values
 from .targets import BoardConfig, BoardType, get_board_config
-from .targets.detection import detect_opencv_circles, pose_from_correspondences
+from .targets.detection import (
+    detect_opencv_circles,
+    detect_toolkit_board,
+    pose_from_correspondences,
+)
 
 
 @dataclass(frozen=True)
@@ -110,6 +115,31 @@ def default_board_mount(board: BoardConfig):
     return value
 
 
+def _svg_texture_controls(board, width_px, height_px):
+    root = ET.parse(board.asset("svg")).getroot()
+    view_box = root.get("viewBox")
+    if view_box:
+        vx, vy, vw, vh = map(float, view_box.split())
+    else:
+        vx, vy = 0.0, 0.0
+        vw, vh = (
+            float(root.get("width").removesuffix("mm")),
+            float(root.get("height").removesuffix("mm")),
+        )
+    centers = {
+        (
+            float(node.get("cx").removesuffix("mm")),
+            float(node.get("cy").removesuffix("mm")),
+        )
+        for node in root.findall(".//{http://www.w3.org/2000/svg}circle")
+        if node.get("fill") == "black"
+    }
+    if len(centers) != len(board.points):
+        raise ValueError("printable SVG marker count does not match configured board")
+    centers = np.asarray(sorted(centers, key=lambda p: (p[1], p[0])))
+    return (centers - [vx, vy]) / [vw, vh] * [width_px, height_px] - 0.5
+
+
 class PlanarBoardRenderer:
     """Project retained board artwork into a pinhole image using metric geometry.
 
@@ -124,6 +154,9 @@ class PlanarBoardRenderer:
         board: BoardConfig,
         camera: ImageCamera | None = None,
         noise: ImageNoise | None = None,
+        *,
+        texture_path: Path | str | None = None,
+        registration_backend: str = "opencv",
     ):
         import cv2 as cv
 
@@ -132,7 +165,9 @@ class PlanarBoardRenderer:
             camera or ImageCamera(),
             noise or ImageNoise(),
         )
-        self.texture_path = board.asset("png")
+        self.texture_path = (
+            Path(texture_path) if texture_path is not None else board.asset("png")
+        )
         self.texture_bytes = self.texture_path.read_bytes()
         texture = cv.imdecode(
             np.frombuffer(self.texture_bytes, np.uint8), cv.IMREAD_COLOR
@@ -152,38 +187,55 @@ class PlanarBoardRenderer:
                 raise ValueError(
                     "source PNG does not contain the configured circle grid"
                 )
-            self.board_to_texture, _ = cv.findHomography(
-                board.points[:, :2], points[:, 0], 0
-            )
-            predicted = cv.perspectiveTransform(
-                board.points[:, :2, None].transpose(0, 2, 1), self.board_to_texture
-            )[:, 0]
-            residual = float(
-                np.sqrt(np.mean(np.sum((predicted - points[:, 0]) ** 2, axis=1)))
-            )
-            if residual > 0.25:
-                raise ValueError("source PNG grid disagrees with metric board geometry")
-            self.registration = {
-                "method": "static-circle-control-point-registration",
-                "rms_source_px": residual,
-            }
-        else:
-            source_corners = np.array(
+            controls = points[:, 0]
+            registration_method = "static-circle-control-point-registration"
+        elif (
+            board.board_type == BoardType.CCTAG_MULTI_V3
+            and registration_backend == "toolkit"
+        ):
+            # Actual native ID decoding establishes the texture's physical
+            # control points. No projected ideal center is a measurement.
+            virtual_camera = np.array(
                 [
-                    [-0.5, -0.5],
-                    [texture_width - 0.5, -0.5],
-                    [texture_width - 0.5, texture_height - 0.5],
-                    [-0.5, texture_height - 0.5],
-                ],
-                np.float32,
+                    [texture_width, 0, texture_width / 2],
+                    [0, texture_width, texture_height / 2],
+                    [0, 0, 1.0],
+                ]
             )
-            self.board_to_texture = cv.getPerspectiveTransform(
-                board.corners[:, :2].astype(np.float32), source_corners
+            detected = detect_toolkit_board(
+                self.texture,
+                virtual_camera,
+                board=board,
+                max_board_tilt_rad=np.pi,
             )
-            self.registration = {
-                "method": "declared-board-canvas-corners",
-                "rms_source_px": None,
-            }
+            if detected is None or detected.image_points is None:
+                raise ValueError(
+                    "native detector could not decode the complete v3 source PNG"
+                )
+            controls = detected.image_points
+            registration_method = "static-native-cctag-control-point-registration"
+        elif board.is_cctag_multi:
+            # The external-centers mode supports the retained legacy artwork
+            # without claiming native decoding. Verify the exact known PNG,
+            # then read marker locations from its paired printable SVG.
+            if self.texture_bytes != board.asset("png").read_bytes():
+                raise ValueError(
+                    "unrecognized CCTag texture requires actual native registration"
+                )
+            controls = _svg_texture_controls(board, texture_width, texture_height)
+            registration_method = "static-svg-control-point-registration"
+        else:
+            raise ValueError("texture rendering requires a full grid board")
+        self.board_to_texture, _ = cv.findHomography(board.points[:, :2], controls, 0)
+        if self.board_to_texture is None:
+            raise ValueError("board texture controls are degenerate")
+        predicted = cv.perspectiveTransform(
+            board.points[:, :2][None], self.board_to_texture
+        )[0]
+        residual = float(np.sqrt(np.mean(np.sum((predicted - controls) ** 2, axis=1))))
+        if residual > 0.25:
+            raise ValueError("source PNG grid disagrees with metric board geometry")
+        self.registration = {"method": registration_method, "rms_source_px": residual}
         if self.board_to_texture is None or not np.all(
             np.isfinite(self.board_to_texture)
         ):
@@ -314,6 +366,7 @@ def _collect(
     role,
     stage,
     measurement_mode,
+    detector_backend,
     max_candidates,
     sample_id_offset,
 ):
@@ -368,13 +421,30 @@ def _collect(
         }
         try:
             if measurement_mode == "image":
-                detection = detect_opencv_circles(
-                    image,
-                    renderer.camera.intrinsic,
-                    np.zeros(5),
-                    board=renderer.board,
-                    max_reprojection_rms_px=0.5,
-                )
+                if detector_backend == "opencv":
+                    detection = detect_opencv_circles(
+                        image,
+                        renderer.camera.intrinsic,
+                        np.zeros(5),
+                        board=renderer.board,
+                        max_reprojection_rms_px=0.5,
+                    )
+                else:
+                    # Match the detector defaults used by import_captures so
+                    # accepted PNGs remain valid when the manifest is reimported.
+                    detection = detect_toolkit_board(
+                        image,
+                        renderer.camera.intrinsic,
+                        np.zeros(5),
+                        board=renderer.board,
+                    )
+                    if detection is not None and (
+                        detection.reprojection_rms_px is None
+                        or detection.reprojection_rms_px > 0.5
+                    ):
+                        raise ValueError(
+                            "native image reprojection RMS exceeds 0.5 px or is unavailable"
+                        )
             else:
                 centers = renderer.project(renderer.board.points, camera_t_board)
                 centers += pixels_rng.normal(0, 0.2, centers.shape)
@@ -439,6 +509,7 @@ def _collect(
         "joint_names": list(truth.joint_names),
         "camera_matrix": renderer.camera.intrinsic.tolist(),
         "distortion": [0.0] * 5,
+        "detector_backend": detector_backend,
         "measurement_model": "rendered-image-detection"
         if measurement_mode == "image"
         else "simulated-external-centers",
@@ -488,6 +559,7 @@ def run_image_experiment(
     seed: int = 42,
     board: BoardConfig | None = None,
     measurement_mode: str = "image",
+    detector_backend: str = "opencv",
     camera: ImageCamera | None = None,
     noise: ImageNoise | None = None,
     base_t_camera=None,
@@ -497,10 +569,11 @@ def run_image_experiment(
 ):
     """Render, detect, fit, and evaluate a robot using independent image sets.
 
-    ``image`` requires the asymmetric-circle board and detects the actual RGB
-    image. ``external-centers`` explicitly simulates noisy center coordinates
-    for an external detector; rendered CCTag images are evidence, not detector
-    input in that mode. Extrinsics are known independently in both modes.
+    ``image`` detects actual RGB pixels with OpenCV circles or the explicitly
+    selected native toolkit and its matching CCTag v3 artwork.
+    ``external-centers`` simulates noisy center coordinates for an external
+    detector; rendered images are evidence rather than detector input in that
+    mode. Extrinsics are known independently in both modes.
 
     Output must be a new or empty directory. The complete artifact directory is
     staged and published only after the numerical experiment succeeds.
@@ -524,10 +597,24 @@ def run_image_experiment(
         )
     if measurement_mode not in {"image", "external-centers"}:
         raise ValueError("measurement_mode must be image or external-centers")
-    if measurement_mode == "image" and board.board_type != BoardType.OPENCV_ACIRCLE:
-        raise ValueError(
-            "full image detection currently requires opencv-acircle; CCTag needs explicit external-centers mode"
-        )
+    if detector_backend not in ("opencv", "toolkit"):
+        raise ValueError("detector_backend must be opencv or toolkit")
+    if measurement_mode == "image":
+        if (
+            detector_backend == "opencv"
+            and board.board_type != BoardType.OPENCV_ACIRCLE
+        ):
+            raise ValueError(
+                "OpenCV full image detection requires opencv-acircle; CCTag needs explicit toolkit backend with v3, or external-centers mode"
+            )
+        if (
+            detector_backend == "toolkit"
+            and board.is_cctag_multi
+            and board.legacy_artwork
+        ):
+            raise ValueError(
+                "legacy CCTag image detection requires a separately verified detector; use the independent v3 target or external-centers"
+            )
     camera, noise = camera or ImageCamera(), noise or ImageNoise()
     base_t_camera = _pose_values(
         default_camera_pose() if base_t_camera is None else base_t_camera,
@@ -545,7 +632,9 @@ def run_image_experiment(
         )
     source = Path(urdf) if urdf is not None else example_urdf()
     source_bytes = source.read_bytes()
-    renderer = PlanarBoardRenderer(board, camera, noise)
+    renderer = PlanarBoardRenderer(
+        board, camera, noise, registration_backend=detector_backend
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=f".{output.name}-image-", dir=output.parent
@@ -570,6 +659,7 @@ def run_image_experiment(
             "train",
             stage,
             measurement_mode,
+            detector_backend,
             max_candidates,
             0,
         )
@@ -583,6 +673,7 @@ def run_image_experiment(
             "validation",
             stage,
             measurement_mode,
+            detector_backend,
             max_candidates,
             max_candidates,
         )
@@ -623,6 +714,7 @@ def run_image_experiment(
             if measurement_mode == "image"
             else "simulated-external-centers",
             "backend": "numpy-pinhole",
+            "detector_backend": detector_backend,
             "board_type": board.board_type.value,
             "seed": seed,
             "truth_seed": seed + 1,
@@ -883,13 +975,23 @@ def _verify_capture_records(root, role, dataset, report, board, camera, hashes):
                 raise ValueError(
                     f"{role} image is invalid or has the wrong camera dimensions"
                 )
-            detection = detect_opencv_circles(
-                cv.cvtColor(decoded, cv.COLOR_BGR2RGB),
-                camera.intrinsic,
-                np.zeros(5),
-                board=board,
-                max_reprojection_rms_px=0.5,
-            )
+            rgb = cv.cvtColor(decoded, cv.COLOR_BGR2RGB)
+            if report.get("detector_backend", "opencv") == "opencv":
+                detection = detect_opencv_circles(
+                    rgb,
+                    camera.intrinsic,
+                    np.zeros(5),
+                    board=board,
+                    max_reprojection_rms_px=0.5,
+                )
+            else:
+                detection = detect_toolkit_board(
+                    rgb,
+                    camera.intrinsic,
+                    np.zeros(5),
+                    board=board,
+                    max_board_tilt_rad=1.2,
+                )
         else:
             if "image" in row or "image_points" not in row:
                 raise ValueError(
@@ -1045,11 +1147,50 @@ def load_image_experiment(path: Path | str) -> tuple[dict, KinematicDataset, dic
         or board.board_type == BoardType.CCTAG_SINGLE
     ):
         raise ValueError("image board identity does not match full-pose experiment")
-    if (
-        report["measurement_model"] == "rendered-image-detection"
-        and board.board_type != BoardType.OPENCV_ACIRCLE
-    ):
-        raise ValueError("image detection mode requires the asymmetric-circle board")
+    detector_backend = report.get("detector_backend", "opencv")
+    if detector_backend not in ("opencv", "toolkit"):
+        raise ValueError("unsupported image detector backend")
+    if report["measurement_model"] == "rendered-image-detection":
+        if (
+            detector_backend == "opencv"
+            and board.board_type != BoardType.OPENCV_ACIRCLE
+        ):
+            raise ValueError(
+                "OpenCV image detection requires the asymmetric-circle board"
+            )
+        if (
+            detector_backend == "toolkit"
+            and board.is_cctag_multi
+            and board.legacy_artwork
+        ):
+            raise ValueError(
+                "legacy CCTag archive does not establish detector compatibility"
+            )
+    # Bind canvas dimensions/origin to actual archived artwork. PnP control
+    # points alone cannot observe the board's outer dimensions or margins.
+    texture = PlanarBoardRenderer(
+        board,
+        camera,
+        ImageNoise(**report["image_noise"]),
+        texture_path=path / "board.png",
+        registration_backend=detector_backend,
+    )
+    if "detector_backend" in report:
+        declared = report.get("texture_registration")
+        if (
+            not isinstance(declared, dict)
+            or declared.get("method") != texture.registration["method"]
+            or type(declared.get("rms_source_px")) not in (int, float)
+            or not np.isclose(
+                declared["rms_source_px"],
+                texture.registration["rms_source_px"],
+                atol=1e-7,
+                rtol=1e-7,
+            )
+        ):
+            raise ValueError(
+                "archived texture registration does not match board geometry"
+            )
     if (
         report.get("source_urdf_sha256") != hashes["nominal.urdf"]
         or report.get("board_png_sha256") != hashes["board.png"]

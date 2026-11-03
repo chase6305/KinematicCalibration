@@ -1,0 +1,10 @@
+newmtl cctag_multi_v3_a4
+Ka 1.000 1.000 1.000
+Kd 1.000 1.000 1.000
+Ks 0.000 0.000 0.000
+map_Kd cctag_multi_v3_a4.png
+
+newmtl board_edge
+Ka 1.000 1.000 1.000
+Kd 1.000 1.000 1.000
+Ks 0.000 0.000 0.000

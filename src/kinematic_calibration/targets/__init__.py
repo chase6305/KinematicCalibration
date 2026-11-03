@@ -16,6 +16,7 @@ import numpy as np
 class BoardType(str, Enum):
     CCTAG_SINGLE = "cctag-single"
     CCTAG_MULTI = "cctag-multi"
+    CCTAG_MULTI_V3 = "cctag-multi-v3"
     OPENCV_ACIRCLE = "opencv-acircle"
 
 
@@ -65,6 +66,10 @@ class BoardConfig:
         origin = np.asarray(self.origin_from_top_left_m, dtype=float)
         if origin.shape != (2,) or not np.all(np.isfinite(origin)):
             raise ValueError("origin_from_top_left_m must contain two finite lengths")
+
+    @property
+    def is_cctag_multi(self) -> bool:
+        return self.board_type in (BoardType.CCTAG_MULTI, BoardType.CCTAG_MULTI_V3)
 
     @property
     def points(self) -> np.ndarray:
@@ -151,6 +156,18 @@ class BoardConfig:
 
 
 BOARD_CONFIGS = {
+    BoardType.CCTAG_MULTI_V3: BoardConfig(
+        BoardType.CCTAG_MULTI_V3,
+        2,
+        3,
+        0.13,
+        0.065,
+        0.3,
+        0.3,
+        "cctag_multi_v3_a4",
+        (0.0525, 0.085),
+        legacy_artwork=False,
+    ),
     BoardType.CCTAG_MULTI: BoardConfig(
         BoardType.CCTAG_MULTI,
         2,

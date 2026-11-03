@@ -6,9 +6,8 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from ..experiment import load_experiment
 from ..targets import BoardConfig, get_board_config
-from .numpy import NumpyBackend
+from .playback import ExperimentPlayback
 
 
 def _frame(scene, name: str, pose: np.ndarray, length: float = 0.08):
@@ -35,20 +34,10 @@ def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int 
             "Viser is optional; install 'kinematic-calibration[visualization]'"
         ) from exc
 
-    manifest = json.loads((Path(experiment) / "manifest.json").read_text())
-    image_experiment = manifest.get("artifact_type") == "image-kinematic-experiment"
-    if image_experiment:
-        from ..image_simulation import load_image_experiment
-
-        report, dataset, model = load_image_experiment(experiment)
-    else:
-        report, dataset, model = load_experiment(experiment)
-    nominal = NumpyBackend.from_urdf(
-        Path(experiment) / "nominal.urdf",
-        end_link=report["end_link"],
-        base_link=report["base_link"],
-    )
-    truth = nominal.perturbed(seed=report["truth_seed"])
+    playback = ExperimentPlayback(experiment)
+    report, dataset, model = playback.report, playback.dataset, playback.model
+    nominal = playback.nominal
+    image_experiment = report.get("experiment_type") == "image-kinematic-calibration"
     if image_experiment:
         import trimesh
         from PIL import Image
@@ -129,6 +118,21 @@ def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int 
         step=1,
         initial_value=0,
     )
+    manual_mode = server.gui.add_checkbox("Explore joint angles", initial_value=False)
+    joint_sliders = []
+    with server.gui.add_folder("Joint angles (rad)"):
+        for index, name in enumerate(nominal.joint_names):
+            lower, upper = nominal.joint_limits[index]
+            joint_sliders.append(
+                server.gui.add_slider(
+                    name,
+                    min=float(lower),
+                    max=float(upper),
+                    step=0.001,
+                    initial_value=float(dataset.joint_positions[0, index]),
+                    disabled=True,
+                )
+            )
     error = server.gui.add_markdown("")
     show_board = server.gui.add_checkbox("Show calibration target", initial_value=True)
     board_handle = server.scene.add_mesh_trimesh("/target", board_mesh)
@@ -145,12 +149,14 @@ def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int 
 
     def update(_event=None):
         index = int(slider.value)
-        q = dataset.joint_positions[index]
+        state = (
+            playback.manual([joint.value for joint in joint_sliders])
+            if manual_mode.value
+            else playback.sample(index)
+        )
         with server.atomic():
-            for name, backend in (("nominal", nominal), ("truth", truth)):
-                positions = np.asarray(
-                    [pose[:3, 3] for pose in backend.link_transforms(q).values()]
-                )
+            for name, links in state.links.items():
+                positions = np.asarray([pose[:3, 3] for pose in links.values()])
                 server.scene.add_line_segments(
                     f"/robot/{name}",
                     points=np.stack([positions[:-1], positions[1:]], axis=1),
@@ -161,25 +167,48 @@ def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int 
                 _frame(
                     server.scene,
                     f"/current/{name}",
-                    model[f"{name}_predictions"][index],
+                    state.poses[name],
                 )
-            _frame(
-                server.scene, "/current/measured", dataset.observed_poses[index], 0.055
+            measured_frame = _frame(
+                server.scene,
+                "/current/measured",
+                np.eye(4) if state.measured_pose is None else state.measured_pose,
+                0.055,
             )
-            board_pose = model["truth_predictions"][index] @ ee_t_board
+            measured_frame.visible = state.measured_pose is not None
+            board_pose = state.poses["truth"] @ ee_t_board
             board_handle.position = board_pose[:3, 3]
             board_handle.wxyz = Rotation.from_matrix(board_pose[:3, :3]).as_quat()[
                 [3, 0, 1, 2]
             ]
             board_handle.visible = show_board.value
             if preview is not None:
-                with Image.open(capture / validation_frames[index]["image"]) as frame:
-                    preview.image = np.asarray(frame.convert("RGB"))
-            measured = dataset.observed_poses[index, :3, 3]
-            fitted = model["calibrated_predictions"][index, :3, 3]
-            error.content = f"Selected endpoint error: **{np.linalg.norm(fitted - measured) * 1000:.3f} mm**"
+                preview.visible = not manual_mode.value
+                if preview.visible:
+                    with Image.open(
+                        capture / validation_frames[index]["image"]
+                    ) as frame:
+                        preview.image = np.asarray(frame.convert("RGB"))
+            error.content = (
+                f"Model vs {state.error_reference}: **{state.position_error_m * 1000:.3f} mm**, "
+                f"**{np.rad2deg(state.orientation_error_rad):.4f}°**"
+            )
+
+    def change_mode(_event):
+        with server.atomic():
+            slider.disabled = manual_mode.value
+            for index, joint in enumerate(joint_sliders):
+                joint.disabled = not manual_mode.value
+                if manual_mode.value:
+                    joint.value = float(
+                        dataset.joint_positions[int(slider.value), index]
+                    )
+        update()
 
     slider.on_update(update)
     show_board.on_update(update)
+    manual_mode.on_update(change_mode)
+    for joint in joint_sliders:
+        joint.on_update(update)
     update()
     return server

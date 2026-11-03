@@ -169,6 +169,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     calibrate.add_argument("--ee-name", default="ee_link")
     calibrate.add_argument(
+        "--backend",
+        choices=["rtb", "numpy"],
+        default="rtb",
+        help="numpy supports geometry-only POE fitting without URDF export",
+    )
+    calibrate.add_argument(
+        "--base-link", help="ancestor base frame for --backend numpy"
+    )
+    calibrate.add_argument(
         "--output-dir",
         type=Path,
         help="artifact directory (default: DATASET parent/calibration)",

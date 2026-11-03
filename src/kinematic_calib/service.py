@@ -17,6 +17,7 @@ from .robot_model import (
     initialize_composite_model,
     validate_nominal_poe,
 )
+from .robust import HuberOptions
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class FitOptions:
     model_mode: str = "robot-body"
     max_iterations: int = 100
     damping: float = 0.0
+    robust: HuberOptions | None = None
 
     def __post_init__(self) -> None:
         if self.model_mode not in {"robot-body", "self-calibrating"}:
@@ -38,6 +40,8 @@ class FitOptions:
             raise ValueError("max_iterations must be a positive integer")
         if not np.isfinite(self.damping) or self.damping < 0.0:
             raise ValueError("damping must be finite and non-negative")
+        if self.robust is not None and not isinstance(self.robust, HuberOptions):
+            raise ValueError("robust must be HuberOptions or None")
 
 
 @dataclass(frozen=True)
@@ -56,16 +60,19 @@ class CalibrationFit:
     estimated_ee_t_target: np.ndarray | None = None
     extrinsic_initialization: dict | None = None
     joint_identity: dict | None = None
+    robust_diagnostics: dict | None = None
 
 
 def fit_dataset(
     dataset: KinematicDataset,
-    calibrator,
+    calibrator=None,
     *,
     options: FitOptions | None = None,
     base_t_camera: np.ndarray | None = None,
     ee_t_target: np.ndarray | None = None,
     model_joint_names: tuple[str, ...] | None = None,
+    calibrator_factory=None,
+    sample_weights: np.ndarray | None = None,
 ) -> CalibrationFit:
     """Fit synchronized observations without writing artifacts.
 
@@ -77,6 +84,11 @@ def fit_dataset(
     from spatialmath import SE3
 
     options = options or FitOptions()
+    source_observation_frame = dataset.observation_frame.value
+    if options.robust is not None and options.model_mode != "robot-body":
+        raise ValueError(
+            "Huber IRLS supports robot-body observations with fixed extrinsics; unknown self-calibrating extrinsics are unsupported"
+        )
     self_calibrating = options.model_mode == "self-calibrating"
     if self_calibrating:
         if base_t_camera is not None or ee_t_target is not None:
@@ -93,6 +105,28 @@ def fit_dataset(
         dataset = dataset.as_robot_body(base_t_camera, ee_t_target)
     elif base_t_camera is not None or ee_t_target is not None:
         raise ValueError("base_T_ee observations do not accept fixed extrinsics")
+
+    if options.robust is not None:
+        if calibrator is not None or not callable(calibrator_factory):
+            raise ValueError(
+                "Huber IRLS requires calibrator_factory and no existing calibrator object"
+            )
+        if sample_weights is not None or model_joint_names is not None:
+            raise ValueError(
+                "Huber IRLS obtains weights internally and joint names from each fresh factory model"
+            )
+        from .robust import fit_huber_irls
+
+        return fit_huber_irls(
+            dataset,
+            calibrator_factory,
+            options=options,
+            source_observation_frame=source_observation_frame,
+        )
+    if calibrator_factory is not None or calibrator is None:
+        raise ValueError(
+            "ordinary fitting requires an initialized calibrator; calibrator_factory is for opt-in Huber IRLS"
+        )
 
     chain_dof = int(calibrator.N_JOINTS)
     if chain_dof != dataset.joint_positions.shape[1]:
@@ -124,10 +158,13 @@ def fit_dataset(
     # valid near-pi rotations because of floating-point roundoff in composition.
     observations = [SE3(pose, check=False) for pose in dataset.observed_poses]
     calibrator.set_observations(dataset.joint_positions, observations)
-    result = calibrator.solve(
-        max_iterations=options.max_iterations,
-        damping=options.damping,
-    )
+    solve_options = {
+        "max_iterations": options.max_iterations,
+        "damping": options.damping,
+    }
+    if sample_weights is not None:
+        solve_options["sample_weights"] = sample_weights
+    result = calibrator.solve(**solve_options)
     axes, zero_pose = calibrator.get_calibration(result)
     return CalibrationFit(
         result=result,

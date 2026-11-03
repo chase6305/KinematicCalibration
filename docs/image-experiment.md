@@ -57,14 +57,39 @@ Base_T_EE_measured = Base_T_Camera @ Camera_T_Board_detected @ inverse(EE_T_Boar
 
 ## 板选择及 CCTag 模式
 
-默认 `opencv-acircle` 使用完整的**图像检测**路径。现有 CCTag 板也能传入，但此示例尚未将 CCTag 原生图像检测器作为自动后端。必须显式选择外部中心模拟：
+默认 `opencv-acircle` 使用 OpenCV 图像检测。`kincal image-demo` 也支持独立的
+`cctag-multi-v3` 板与显式 `--detector-backend toolkit`：原生解码器先注册源 PNG
+的标记 ID，再逐张检测渲染后的 RGB 图像，不使用理想投影中心代替测量。
+v3 资源来自固定 Toolkit commit 的 version-3 模板，包含独立的来源/哈希记录；
+它与旧板分别命名，不覆盖旧资源或默认板配置。
+
+按 [原生构建说明](native-build.md) 完成安装后，在项目根目录运行：
+
+```bash
+source outputs/native-pinned/build/Release/generators/conanrun.sh
+PYTHONPATH="$PWD/outputs/native-pinned/install/lib/python" \
+  .venv/bin/python -m kinematic_calibration image-demo \
+  --output outputs/cctag-v3-images --board cctag-multi-v3 \
+  --detector-backend toolkit --samples 12 --validation-samples 6
+```
+
+原生扩展需要与解释器 ABI 匹配；构建、安装及运行库配置均为显式步骤，普通导入不执行构建。
+这一链路的 optional-native 测试包含 PNG 解码/位姿恢复、CLI 拟合和归档重新检测：
+
+```bash
+PYTHONPATH="$PWD/outputs/native-pinned/install/lib/python" \
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q \
+  tests/image_simulation/test_native_image_experiment.py
+```
+
+旧 `cctag-multi` 仍使用显式外部中心模拟：
 
 ```bash
 python examples/image_calibration.py --output runs/cctag-centers \
   --board cctag-multi --measurement-mode external-centers
 ```
 
-该模式保存渲染图像作为证据，但测量输入是投影中心加 0.2 px Gaussian 像素噪声，再经 PnP 求得的板位姿。报告标为 `simulated-external-centers`，不会宣称已经从 CCTag 图像识别到这些中心。对应 capture manifest 保存 `image_points`，不伪装成 `image` 检测数据。已有物理旧板可以继续使用兼容检测器提供有序中心；完整 CCTag 图像检测仍通过 [手眼和标定板接口](boards-and-handeye.md) 接入。单标记不支持此完整位姿实验。
+该模式保存渲染图像作为证据，但测量输入是投影中心加 0.2 px Gaussian 像素噪声，再经 PnP 求得的板位姿。报告标为 `simulated-external-centers`，对应 capture manifest 保存 `image_points`。已有物理旧板可以继续使用兼容检测器提供有序中心；接口见 [手眼和标定板说明](boards-and-handeye.md)。单标记不支持此完整位姿实验。
 
 ## 输出与复核
 
@@ -92,6 +117,11 @@ measured, report = import_captures(
 ## 数值记录与范围
 
 本工作站默认配置、种子 42 的一次运行中，50/20 个训练/留出图像得到 30/30 参数秩，条件数约 16.96。留出真值位置 RMSE 从名义模型的约 9.41 mm 降至约 0.088 mm，图像测量自身约 0.127 mm。该结果来自合成图像，外参精确已知，不能作为真实机器人精度指标。
+
+同一工作站的 v3 原生图像路径、种子 42、12/6 个训练/独立留出图像得到 30/30 秩、
+条件数 23.69，3 轮收敛；留出真值位置 RMSE 为 10.41 → 1.81 mm，图像测量自身
+约 0.86 mm。该组使用 0.5 灰度级像素噪声、0.3 px 模糊和 2 倍超采样；
+不同板和检测器的结果分别报告，不混用其精度。
 
 `accepted` 表示合成求解的收敛、秩和条件数门限通过；真值/测量误差另外报告。实验不模拟遮挡、碰撞、真实照明变化、动力学、相机畸变或手眼外参估计误差，适合验证算法链路、采样可辨识性及图像噪声影响。
 

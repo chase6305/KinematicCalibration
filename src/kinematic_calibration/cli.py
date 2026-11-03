@@ -55,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--allow-legacy-profile", action="store_true")
     capture.add_argument("--force", action="store_true")
     plan = commands.add_parser(
-        "plan", help="Select informative joint configurations from a nominal URDF"
+        "plan", help="Select calibration poses and plan their visit order"
     )
     plan.add_argument("--urdf", type=Path)
     plan.add_argument("--end-link", default="ee_link")
@@ -64,6 +64,18 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--candidates", type=int, default=400)
     plan.add_argument("--seed", type=int, default=42)
     plan.add_argument("--characteristic-length-m", type=float, default=1.0)
+    plan.add_argument(
+        "--start-joints",
+        type=float,
+        nargs="+",
+        metavar="RAD",
+        help="Start configuration in URDF joint order (radians)",
+    )
+    plan.add_argument(
+        "--return-to-start",
+        action="store_true",
+        help="Include a return leg to --start-joints",
+    )
     plan.add_argument("--output", type=Path, required=True)
     plan.add_argument("--force", action="store_true")
     image_demo = commands.add_parser(
@@ -77,10 +89,18 @@ def build_parser() -> argparse.ArgumentParser:
     image_demo.add_argument("--validation-samples", type=int, default=20)
     image_demo.add_argument("--seed", type=int, default=42)
     image_demo.add_argument(
-        "--board", choices=("opencv-acircle", "cctag-multi"), default="opencv-acircle"
+        "--board",
+        choices=("opencv-acircle", "cctag-multi", "cctag-multi-v3"),
+        default="opencv-acircle",
     )
     image_demo.add_argument(
         "--measurement-mode", choices=("image", "external-centers"), default="image"
+    )
+    image_demo.add_argument(
+        "--detector-backend",
+        choices=("opencv", "toolkit"),
+        default="opencv",
+        help="Image detector; CCTag v3 requires the optional native toolkit",
     )
     image_demo.add_argument("--rgb-noise-std", type=float, default=0.5)
     image_demo.add_argument("--blur-sigma-px", type=float, default=0.3)
@@ -114,15 +134,9 @@ def main(argv=None) -> int:
             print(json.dumps(report, indent=2, allow_nan=False))
             return 0 if report["accepted"] else 1
         elif args.command == "inspect":
-            manifest = json.loads((args.experiment / "manifest.json").read_text())
-            if manifest.get("artifact_type") == "image-kinematic-experiment":
-                from .image_simulation import load_image_experiment
+            from .artifacts import load_experiment_bundle
 
-                report, _, _ = load_image_experiment(args.experiment)
-            else:
-                from .experiment import load_experiment
-
-                report, _, _ = load_experiment(args.experiment)
+            report, _, _ = load_experiment_bundle(args.experiment)
             print(json.dumps(report, indent=2, allow_nan=False))
         elif args.command == "image-demo":
             from .image_simulation import ImageNoise, run_image_experiment
@@ -138,6 +152,7 @@ def main(argv=None) -> int:
                 seed=args.seed,
                 board=get_board_config(args.board),
                 measurement_mode=args.measurement_mode,
+                detector_backend=args.detector_backend,
                 noise=ImageNoise(
                     args.rgb_noise_std, args.blur_sigma_px, args.supersample
                 ),
@@ -172,6 +187,8 @@ def main(argv=None) -> int:
                 candidates=args.candidates,
                 seed=args.seed,
                 characteristic_length_m=args.characteristic_length_m,
+                start_configuration=args.start_joints,
+                return_to_start=args.return_to_start,
                 force=args.force,
             )
             print(json.dumps(report, indent=2, allow_nan=False))

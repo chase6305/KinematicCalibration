@@ -85,10 +85,16 @@ kinematic-calib solve --backend numpy --dataset train.npz --urdf robot.urdf \
   --ee-name tool_link --model-mode robot-body --output outputs/fit.npz
 kinematic-calib validate-result --parameters outputs/fit.npz \
   --dataset validation.npz --output outputs/validation.json
+
+# 统一入口也支持无 RTB 的几何拟合、工件复核及汇总
+kinematic-calib calibrate --backend numpy --calibration-type geometry \
+  --dataset train.npz --urdf robot.urdf --ee-name tool_link \
+  --output-dir outputs/calibration --skip-handeye
 ```
 
 `--backend numpy` 支持指定 `--base-link`、已知相机外参及复合模型；结果用于预测和独立
 验证，不包含物理 joint origin，因此明确不允许通过该路线导出 URDF。
+统一入口会在结果中注明跳过导出的原因；零偏和 `both` 阶段仍使用可选 RTB 适配器。
 
 完整迁移的 URDF 工作流使用可选 RTB 模型适配器：
 
@@ -132,19 +138,35 @@ fit = fit_dataset(KinematicDataset.load("base_ee_observations.npz"), solver)
 ```bash
 # 示例含两帧合成投影中心，仅用于检查格式，样本量不足以求解六轴机器人
 kincal import-captures examples/captures.example.json --output outputs/captures.npz
+kinematic-calib verify-collection --dataset outputs/captures.npz \
+  --report outputs/captures.report.json
 
-# 从候选关节配置中选择对几何参数更有信息量的姿态
+# 选择多个标定姿态，再缩短这些姿态的访问路径
 kincal plan --count 40 --candidates 400 --output outputs/pose-plan.npz
+
+# 指定六轴起始关节角，最后返回起点；角度单位为弧度
+kincal plan --count 40 --start-joints 0 0 0 0 0 0 --return-to-start \
+  --output outputs/pose-plan-round-trip.npz
 ```
 
 采集 manifest 包含内参、畸变、板类型、关节顺序、关节/图像时间戳，以及图像路径或按
 `board.points` 排列的像素点。默认时间差不超过 0.03 s、重投影 RMS 不超过 2 px，并拒绝
 检测到的平面姿态歧义。错误帧会记录原因；默认整批失败，只有显式 `--allow-partial` 才
 输出剩余帧。报告保存为 `captures.report.json`，含逐帧质量和数据哈希。
+`verify-collection` 复核数据与导入报告的一致性，不重新检测源图像。
 
-姿态选择基于移植求解器的解析回归矩阵做贪心 D-optimal 选择，报告未正则化的秩/条件数；
-`--characteristic-length-m` 指定平移/旋转的尺度。输出是计划配置，不是观测数据，尚未做
-碰撞或相机可见性检查，不能直接下发到实机。
+姿态选择基于解析回归矩阵做贪心 D-optimal 选择，报告未正则化的秩/条件数；
+`--characteristic-length-m` 指定平移/旋转的尺度。随后以关节角欧氏距离做最近邻与 2-opt
+排序，保证总距离不长于原选姿顺序，但不保证全局最短。没有指定起点时，从首个选中姿态
+出发；`--start-joints` 按 URDF 关节列顺序提供，`--return-to-start` 要求明确起点。
+距离按原始弧度计算，不隐式绕过 ±π，也不代表执行时间。
+
+计划 NPZ schema 2 中，`planned_joint_positions` 按访问顺序排列；`candidate_indices`
+指向原候选行，`selected_candidate_indices` 保留 D-optimal 选姿顺序，`visit_order` 是两者
+之间的排列。另存关节名称、限位、每段距离及元数据。起始配置和可选回程记录在元数据与
+距离中，不额外算作标定姿态。输出尚未做碰撞或相机可见性检查，也不生成带速度约束的轨迹。
+完整的无 DexSim 示例见 [planned_calibration.py](examples/planned_calibration.py)：按计划顺序
+从独立扰动真值模型生成合成观测，再拟合并用另一批关节配置验证。
 
 ## 验证与开发
 

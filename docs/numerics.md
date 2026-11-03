@@ -97,3 +97,67 @@ c = (1 - theta/2 cot(theta/2)) / theta²
 `4.284e-9` 的相对平方目标。这是显式数值停滞，不是真实梯度严格为零。
 对照中故意限制过大的搜索步长时，提出校正范数为 `0.03245`，
 仍可降低约 `99.96%` 的目标，继续保留 `line_search_failed`。
+
+## 每观测样本权重
+
+`solve(..., sample_weights=weights)` 接受形状为 `(N_OBSERVATIONS,)`
+的严格正、有限、实数向量，默认全部为 1。每个值是残差乘数；若目标是
+平方损失中的 precision 权重 `p`，应传 `sqrt(p)`，而不是 `p`。
+全局位置/姿态权重和样本权重相乘：
+
+```text
+W_i = sample_weights[i] * diag(position_weight × 3, orientation_weight × 3)
+minimize sum_i ||W_i log(Measured_i @ inv(Predicted_i))||²
+```
+
+point 模式每个 `W_i` 只有三个位置分量。不接受零权重或隐式删除样本；
+要排除观测需显式构建筛选后的数据集。若权重乘积在浮点运算中变成零或
+非有限值，会拒绝求解。权重用于同一套线性方程、回溯目标和停止条件。
+有阻尼时求解 `||W(Ak-y)||² + damping ||k||²`，共同缩放权重会改变
+相对正则强度，因此不能当成正则问题的无影响单位变换。
+
+每轮结果保留 raw `A_all`、`twist_errors`、`matrix_rank`、
+`singular_values`、`condition_number`，同时提供：
+
+- `row_weights`：展平后每行的完整残差乘数；
+- `weighted_A_all`、`weighted_twist_errors`：实际进入数据项的矩阵和残差；
+- `weighted_matrix_rank`、`weighted_singular_values`、
+  `weighted_condition_number`：实际加权问题的数值可辨识性。
+
+上述三个 weighted 诊断也由 `get_statistics()` 返回。正权重在精确数学中
+不改变秩，但极小权重可能使部分方向在浮点精度下无法辨识；
+验收加权拟合时应检查 weighted 诊断，不能仅使用 raw 满秩结论。
+
+`joints_uncertainty` 使用实际加权回归矩阵及加权残差，通过设计矩阵的
+SVD 计算局部方差信息，避免先构造 `AᵀA` 使条件数平方。秩不足或
+残差自由度不足仍返回 `NaN`。为兼容上游，返回的是每关节四个参数方差的
+范数，而不是直接的关节标准差或末端精度。方法标记为
+`uncertainty_method='local_linear_weighted_residual_heuristic'`。
+只有合理的统计噪声/白化假设才能赋予这类局部估计统计含义；
+当权重来自 Huber 等 IRLS 的同一批数据残差时，它不包含权重估计的不确定度，
+不能解释为校准参数置信区间。
+
+## 显式 Huber IRLS
+
+内存服务可选择样本级重加权；尺度由调用者按传感器噪声指定，不从验证集或拟合残差估计。
+每轮工厂必须返回新的、几何相同的名义模型：
+
+```python
+from kinematic_calib import FitOptions, HuberOptions, fit_dataset
+from robotkinecal import SerialRobotKineCal
+
+fit = fit_dataset(
+    dataset,
+    calibrator_factory=lambda: SerialRobotKineCal.from_screw_axes(
+        axes, home, joint_names=joint_names
+    ),
+    options=FitOptions(robust=HuberOptions(
+        position_scale_m=0.0001, orientation_scale_rad=0.0002
+    )),
+)
+```
+
+当前仅支持固定外参的 robot-body 模式；相机观测需先提供两个已知外参。所有样本保留正权重，
+诊断记录每个样本乘数、内外层停止状态及加权秩。权重来自端点位置与SO(3)角误差，内层仍
+最小化空间twist平方残差，因此这是显式启用的IRLS启发式，不是精确的端点Huber最优化。
+部署前仍需另用未参与拟合的数据验证。

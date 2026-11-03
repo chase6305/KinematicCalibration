@@ -61,8 +61,13 @@ class NumpyBackend:
                 )
             if joint.kind not in ("fixed", "revolute", "continuous"):
                 raise ValueError(f"unsupported joint kind: {joint.kind!r}")
-            origin = np.array(joint.origin, dtype=float, copy=True)
-            axis = np.array(joint.axis, dtype=float, copy=True)
+            raw_origin, raw_axis = np.asarray(joint.origin), np.asarray(joint.axis)
+            if raw_origin.dtype.kind not in "iuf" or raw_axis.dtype.kind not in "iuf":
+                raise ValueError(
+                    "joint origins and axes must contain real numeric values"
+                )
+            origin = raw_origin.astype(float, copy=True)
+            axis = raw_axis.astype(float, copy=True)
             if (
                 origin.shape != (4, 4)
                 or not np.isfinite(origin).all()
@@ -187,28 +192,40 @@ class NumpyBackend:
         return len(self.joint_names)
 
     def _validate_q(self, joint_positions: np.ndarray) -> np.ndarray:
-        q = np.asarray(joint_positions, dtype=float)
-        if q.shape != (self.dof,) or not np.isfinite(q).all():
+        raw = np.asarray(joint_positions)
+        if raw.dtype.kind not in "iuf" or raw.shape != (self.dof,):
             raise ValueError(f"joint_positions must be finite with shape ({self.dof},)")
-        return q
+        with np.errstate(over="ignore", invalid="ignore"):
+            positions = raw.astype(float, copy=False)
+        if not np.isfinite(positions).all():
+            raise ValueError(f"joint_positions must be finite with shape ({self.dof},)")
+        return positions
 
-    def link_transforms(self, joint_positions: np.ndarray) -> dict[str, np.ndarray]:
-        q = self._validate_q(joint_positions)
+    def _chain_transforms(self, joint_positions: np.ndarray):
+        """Yield distinct Base_T_Link arrays, sharing the chain calculation."""
+        positions = self._validate_q(joint_positions)
         pose = np.eye(4)
-        result = {self.base_link: pose.copy()}
-        index = 0
+        yield self.base_link, pose
+        joint_index = 0
         for joint in self.joints:
             pose = pose @ joint.origin
             if joint.kind != "fixed":
-                motion = np.eye(4)
-                motion[:3, :3] = Rotation.from_rotvec(joint.axis * q[index]).as_matrix()
-                pose = pose @ motion
-                index += 1
-            result[joint.child] = pose.copy()
-        return result
+                rotation = Rotation.from_rotvec(
+                    joint.axis * positions[joint_index]
+                ).as_matrix()
+                # Right-multiplying a pure rotation leaves translation intact.
+                pose[:, :3] = pose[:, :3] @ rotation
+                joint_index += 1
+            yield joint.child, pose
+
+    def link_transforms(self, joint_positions: np.ndarray) -> dict[str, np.ndarray]:
+        return dict(self._chain_transforms(joint_positions))
 
     def forward(self, joint_positions: np.ndarray) -> np.ndarray:
-        return self.link_transforms(joint_positions)[self.end_link]
+        # Terminal FK does not need a dictionary or copies of every link pose.
+        for _, pose in self._chain_transforms(joint_positions):
+            pass
+        return pose
 
     def poe_parameters(self) -> tuple[np.ndarray, np.ndarray]:
         """Return space screw axes (N,6), ordered [v,w], and Base_T_End(0)."""

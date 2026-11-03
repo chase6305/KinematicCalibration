@@ -1,6 +1,8 @@
-These legacy printable and simulator assets are copied without modification from
+These legacy printable and simulator assets are copied from
 `/home/ubuntu/workspace/dexforce/auto_calibrate_sim/handeye_calib_sim/assets`
 at commit `9488a2dbffc3e7635f3b0109a8839bd261a57cb0`.
+Images retain their original bytes; a few text assets only have trailing
+whitespace and blank lines normalized. Geometry and printed patterns are retained.
 
 The six-marker `A4-300_300_3` profile is a **300 × 300 mm** square board, with
 130 mm column pitch and 65 mm physical row pitch. The origin of the detected
@@ -19,3 +21,7 @@ ring-profile compatibility. With the toolkit's staggered-grid convention, pass
 the second detector parameter is **twice** the 65 mm physical row pitch.
 
 No new licensing terms are asserted for these existing project assets.
+
+`cctag_multi_v3_a4` is a separate toolkit-derived v3 target. Its accompanying
+`.provenance.json` records the pinned source, geometry and SVG/PNG fingerprints.
+It does not replace the retained `A4-300_300_3` artwork.
