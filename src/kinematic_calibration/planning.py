@@ -85,7 +85,7 @@ def select_informative_poses(
     calibrator.set_observations(
         q, [SE3(p, check=False) for p in predict_poe(axes, home, q)]
     )
-    blocks = np.asarray([calibrator.A_Matrix(row) for row in q])
+    blocks = calibrator.regressor_blocks(q)
     blocks[:, :3] /= characteristic_length_m
     parameters = blocks.shape[2]
     information_inverse = np.eye(parameters) / regularization
@@ -195,6 +195,7 @@ def save_pose_plan(
         "selected_count": count,
         "regressor_rank": selected.rank,
         "parameter_count": selected.parameter_count,
+        "full_rank": selected.rank == selected.parameter_count,
         "condition_number": selected.condition_number,
         "characteristic_length_m": characteristic_length_m,
     }

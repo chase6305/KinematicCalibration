@@ -5,6 +5,7 @@ an initialized RobotKineCal-compatible calibrator, so acquisition, visualization
 URDF loading and model selection remain outside the numerical workflow.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,6 +55,7 @@ class CalibrationFit:
     estimated_camera_t_base: np.ndarray | None = None
     estimated_ee_t_target: np.ndarray | None = None
     extrinsic_initialization: dict | None = None
+    joint_identity: dict | None = None
 
 
 def fit_dataset(
@@ -63,6 +65,7 @@ def fit_dataset(
     options: FitOptions | None = None,
     base_t_camera: np.ndarray | None = None,
     ee_t_target: np.ndarray | None = None,
+    model_joint_names: tuple[str, ...] | None = None,
 ) -> CalibrationFit:
     """Fit synchronized observations without writing artifacts.
 
@@ -97,6 +100,13 @@ def fit_dataset(
             f"selected chain has {chain_dof} revolute joints but dataset has "
             f"{dataset.joint_positions.shape[1]} columns"
         )
+    identity = dataset.check_joint_identity(
+        model_joint_names
+        if model_joint_names is not None
+        else getattr(calibrator, "joint_names", None)
+    )
+    if not identity["verified"]:
+        logging.getLogger(__name__).warning("%s", identity["reason"])
     dataset.validate_solver_sample_count()
     if getattr(calibrator, "robot_model", None) is not None:
         validate_nominal_poe(calibrator, dataset.joint_positions[0])
@@ -127,4 +137,5 @@ def fit_dataset(
         estimated_camera_t_base=camera_t_base,
         estimated_ee_t_target=ee_t_target_estimate,
         extrinsic_initialization=initialization,
+        joint_identity=identity,
     )

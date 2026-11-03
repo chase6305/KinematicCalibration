@@ -9,7 +9,25 @@ import numpy as np
 
 from .io_utils import atomic_savez_compressed
 
-DATASET_SCHEMA_VERSION = 1
+DATASET_SCHEMA_VERSION = 2
+
+
+def validated_joint_names(
+    value, dof: int, *, label: str = "joint_names"
+) -> tuple[str, ...]:
+    """Normalize an ordered, unique joint-column identity without reordering."""
+    names = np.asarray(value)
+    if (
+        names.ndim != 1
+        or names.shape != (dof,)
+        or names.dtype.kind != "U"
+        or any(not name.strip() for name in names.tolist())
+        or len(set(names.tolist())) != dof
+    ):
+        raise ValueError(
+            f"{label} must contain {dof} unique nonempty strings in joint-column order"
+        )
+    return tuple(names.tolist())
 
 
 def read_dataset_schema_version(path: Path | str) -> int | None:
@@ -108,6 +126,7 @@ class KinematicDataset:
     observed_poses: np.ndarray
     observation_frame: ObservationFrame
     sample_indices: np.ndarray | None = None
+    joint_names: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         raw_joints = np.asarray(self.joint_positions)
@@ -156,9 +175,20 @@ class KinematicDataset:
             ):
                 raise ValueError("sample_indices must be unique and non-negative")
         object.__setattr__(self, "sample_indices", sample_indices)
+        if self.joint_names is not None:
+            object.__setattr__(
+                self,
+                "joint_names",
+                validated_joint_names(self.joint_names, joints.shape[1]),
+            )
 
     def save(self, path: Path | str) -> None:
         """Save a portable NPZ without pickle-backed objects."""
+        metadata = (
+            {"joint_names": np.asarray(self.joint_names)}
+            if self.joint_names is not None
+            else {}
+        )
         atomic_savez_compressed(
             path,
             schema_version=np.asarray(DATASET_SCHEMA_VERSION, dtype=np.int64),
@@ -166,13 +196,14 @@ class KinematicDataset:
             observed_poses=self.observed_poses,
             observation_frame=np.asarray(self.observation_frame.value),
             sample_indices=self.sample_indices,
+            **metadata,
         )
 
     @classmethod
     def load(cls, path: Path | str) -> "KinematicDataset":
         """Load and validate a dataset from disk."""
         schema_version = read_dataset_schema_version(path)
-        if schema_version not in (None, DATASET_SCHEMA_VERSION):
+        if schema_version not in (None, 1, DATASET_SCHEMA_VERSION):
             raise ValueError(f"unsupported dataset schema version: {schema_version}")
         with np.load(path, allow_pickle=False) as data:
             required = {"joint_positions", "observed_poses", "observation_frame"}
@@ -186,6 +217,9 @@ class KinematicDataset:
                 sample_indices=(
                     data["sample_indices"] if "sample_indices" in data.files else None
                 ),
+                joint_names=data["joint_names"]
+                if "joint_names" in data.files
+                else None,
             )
 
     def as_robot_body(
@@ -202,7 +236,46 @@ class KinematicDataset:
             poses,
             ObservationFrame.BASE_T_EE,
             self.sample_indices,
+            self.joint_names,
         )
+
+    def check_joint_identity(self, expected_joint_names) -> dict:
+        """Check exact column order; legacy missing names stay explicitly unverified.
+
+        This method never guesses joint identity from column count and never
+        reorders data. A named dataset requires declared model joint names.
+        """
+        expected = (
+            validated_joint_names(
+                expected_joint_names,
+                self.joint_positions.shape[1],
+                label="model joint_names",
+            )
+            if expected_joint_names is not None
+            else None
+        )
+        if self.joint_names is not None:
+            if expected is None:
+                raise ValueError(
+                    "named dataset requires model joint_names to verify column identity"
+                )
+            if self.joint_names != expected:
+                raise ValueError(
+                    "dataset joint_names order does not match model: "
+                    f"dataset={list(self.joint_names)}, model={list(expected)}; "
+                    "columns are never automatically reordered"
+                )
+        verified = self.joint_names is not None and expected is not None
+        return {
+            "verified": verified,
+            "dataset_joint_names": list(self.joint_names)
+            if self.joint_names is not None
+            else None,
+            "model_joint_names": list(expected) if expected is not None else None,
+            "reason": "exact ordered names match"
+            if verified
+            else "dataset has no joint_names; joint-column identity is unverified",
+        }
 
     def validate_solver_sample_count(self) -> None:
         """Reject data below RobotKineCal's full-pose equation lower bound."""
@@ -250,6 +323,10 @@ class KinematicDataset:
                 int(self.sample_indices[position]) for position in duplicate_positions
             ],
             "dof": int(self.joint_positions.shape[1]),
+            "joint_names": list(self.joint_names)
+            if self.joint_names is not None
+            else None,
+            "joint_names_present": self.joint_names is not None,
             "observation_frame": self.observation_frame.value,
             "source_sample_index_min": int(self.sample_indices.min()),
             "source_sample_index_max": int(self.sample_indices.max()),

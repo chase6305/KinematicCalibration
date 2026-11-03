@@ -9,6 +9,7 @@ from kinematic_calib.dataset import (
     KinematicDataset,
     ObservationFrame,
     invert_transform,
+    validated_joint_names,
 )
 
 from .backends.protocol import KinematicsBackend
@@ -52,6 +53,9 @@ def sample_measurements(
         raise ValueError("seed must be a non-negative integer")
     if (base_t_camera is None) != (ee_t_target is None):
         raise ValueError("camera measurements require both fixed transforms")
+    joint_names = validated_joint_names(
+        getattr(truth, "joint_names", None), truth.dof, label="backend joint_names"
+    )
     noise = noise or MeasurementNoise()
     rng = np.random.default_rng(seed)
     limits = np.asarray(truth.joint_limits, dtype=float)
@@ -90,4 +94,4 @@ def sample_measurements(
         if camera_t_base is None
         else ObservationFrame.CAMERA_T_TARGET
     )
-    return KinematicDataset(joints, np.asarray(poses), frame)
+    return KinematicDataset(joints, np.asarray(poses), frame, joint_names=joint_names)

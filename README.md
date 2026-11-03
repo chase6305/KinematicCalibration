@@ -21,6 +21,10 @@ kincal demo --samples 100 --validation-samples 40 --output outputs/ur10
 # 浏览器打开终端显示的地址；滑块切换独立验证姿态
 kincal view outputs/ur10
 kincal inspect outputs/ur10
+
+# 图像闭环：渲染旧圆板 PNG、实际检测/PnP、拟合、独立留出验证
+kincal image-demo --output outputs/image-demo
+kincal view outputs/image-demo
 ```
 
 已有仓库只需 `git submodule update --init --recursive`。子模块源码与构建是独立步骤，基础
@@ -59,6 +63,8 @@ flowchart LR
 | `kinematic_calibration.targets` | 标定板尺寸、坐标、资源、图像检测和 PnP |
 | `kinematic_calibration.handeye` | OpenCV / HandEyeCalibrationToolkit 的统一接口 |
 | `kinematic_calibration.experiment` | 可复现实验、留出数据、可迁移且带哈希的结果 |
+| `kinematic_calibration.image_simulation` | 图像渲染、检测测量、独立图像验证和完整工件检查 |
+| `kinematic_calibration.acquisition` | 图像/中心、编码器、同步和质量报告的离线导入 |
 | `third_party/HandEyeCalibrationToolkit` | 固定版本 Git 子模块；单独构建原生检测/标定能力 |
 
 所有变换用 `A_T_B` 表示将 B 中的坐标变到 A；长度为米，角度为弧度；螺旋轴排列为
@@ -68,7 +74,8 @@ flowchart LR
 ## 使用已有数据与 URDF
 
 数据格式是无 pickle 的 NPZ：`joint_positions[N,DOF]`、`observed_poses[N,4,4]`、
-`observation_frame`（`base_T_ee` 或 `camera_T_target`）、`sample_indices[N]`、`schema_version`。
+`observation_frame`（`base_T_ee` 或 `camera_T_target`）、`sample_indices[N]`、`schema_version`、
+新版 `joint_names[DOF]`。名称按序与 URDF 匹配，旧无名数据会明确标记列身份未验证。
 请使用真实编码器和独立传感器观测；以名义模型 FK 充当测量无法验证运动学误差。
 
 无 RTB 路线可以直接拟合 POE 并保存带来源校验的工件：
@@ -118,6 +125,7 @@ fit = fit_dataset(KinematicDataset.load("base_ee_observations.npz"), solver)
 板尺寸、行距、OBJ 和检测坐标转换均显式描述。旧 CCTag artwork 与工具包新版编码样式
 存在版本差异，默认检测会拒绝隐式混用；已有旧检测中心可直接用于 PnP。
 见 [标定板与手眼说明](docs/boards-and-handeye.md)。
+固定子模块的源码构建、CTest 和本地安装见 [原生构建](docs/native-build.md)。
 
 ## 采集导入与姿态选择
 
@@ -143,7 +151,7 @@ kincal plan --count 40 --candidates 400 --output outputs/pose-plan.npz
 ```bash
 # 共享工作区可能注入 ROS 的 pytest 插件，因此隔离第三方自动插件
 env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q
-.venv/bin/ruff check src tests
+.venv/bin/ruff check src tests scripts benchmarks
 .venv/bin/python -m build
 ```
 
@@ -153,3 +161,5 @@ env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q
 目录仍可加载。`accepted` 仅代表声明的合成实验诊断范围，不等于实机部署验收。
 
 来源和本地改动见 [移植记录](docs/porting.md) 与 [架构说明](docs/architecture.md)。
+另见 [图像实验](docs/image-experiment.md)、[数据契约](docs/data-contract.md)、
+[数值约定](docs/numerics.md)、[实测性能](docs/performance.md) 和 [优化记录](docs/worklog.md)。

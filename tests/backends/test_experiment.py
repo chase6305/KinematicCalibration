@@ -329,7 +329,11 @@ def test_load_rejects_joint_states_outside_model_limits(experiment_snapshot, tmp
     joints = train.joint_positions.copy()
     joints[0, 0] = 100
     KinematicDataset(
-        joints, train.observed_poses, train.observation_frame, train.sample_indices
+        joints,
+        train.observed_poses,
+        train.observation_frame,
+        train.sample_indices,
+        train.joint_names,
     ).save(path / "train.npz")
     _refresh_manifest(path)
     with pytest.raises(ValueError, match="joint states exceed"):
@@ -358,3 +362,62 @@ def test_publish_interruption_restores_previous_experiment(
         run_experiment(path, samples=20, validation_samples=8, seed=19, force=True)
     assert {entry.name: entry.read_bytes() for entry in path.iterdir()} == before
     load_experiment(path)
+
+
+def test_new_simulation_and_experiment_datasets_have_exact_model_joint_names(
+    experiment_snapshot,
+):
+    from kinematic_calib.dataset import KinematicDataset
+
+    report, validation, model = load_experiment(experiment_snapshot)
+    training = KinematicDataset.load(experiment_snapshot / "train.npz")
+    assert training.joint_names == validation.joint_names == tuple(model["joint_names"])
+    assert report["joint_identity_verified"]
+    assert report["joint_identity"]["training"]["verified"]
+    assert report["joint_identity"]["validation"]["verified"]
+
+
+def test_previous_schema_two_experiment_with_unnamed_v1_data_loads_unverified(
+    experiment_snapshot, tmp_path, caplog
+):
+    import json
+
+    path = _copy_experiment(experiment_snapshot, tmp_path / "legacy-experiment")
+    for filename in ("train.npz", "validation.npz"):
+        with np.load(path / filename, allow_pickle=False) as archive:
+            arrays = {
+                key: archive[key] for key in archive.files if key != "joint_names"
+            }
+        arrays["schema_version"] = np.asarray(1)
+        np.savez_compressed(path / filename, **arrays)
+    report_path = path / "metrics.json"
+    report = json.loads(report_path.read_text())
+    report.pop("joint_identity_verified")
+    report.pop("joint_identity")
+    report_path.write_text(json.dumps(report))
+    _refresh_manifest(path)
+    original_report_bytes = report_path.read_bytes()
+    report, validation, _ = load_experiment(path)
+    assert not report["joint_identity_verified"]
+    assert validation.joint_names is None
+    assert "unverified" in caplog.text
+    assert report_path.read_bytes() == original_report_bytes
+
+
+def test_experiment_rejects_validation_joint_name_permutation(
+    experiment_snapshot, tmp_path
+):
+    from kinematic_calib.dataset import KinematicDataset
+
+    path = _copy_experiment(experiment_snapshot, tmp_path / "experiment")
+    validation = KinematicDataset.load(path / "validation.npz")
+    KinematicDataset(
+        validation.joint_positions[:, ::-1],
+        validation.observed_poses,
+        validation.observation_frame,
+        validation.sample_indices,
+        validation.joint_names[::-1],
+    ).save(path / "validation.npz")
+    _refresh_manifest(path)
+    with pytest.raises(ValueError, match="joint_names order"):
+        load_experiment(path)

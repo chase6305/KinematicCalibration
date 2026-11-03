@@ -17,6 +17,7 @@ from kinematic_calib.dataset import (
     KinematicDataset,
     ObservationFrame,
     _validate_transforms,
+    validated_joint_names,
 )
 from kinematic_calib.io_utils import atomic_write_json
 
@@ -180,13 +181,14 @@ def _validate_manifest(manifest: dict, root: Path, board: BoardConfig | None):
             )
         )
     names = manifest.get("joint_names")
-    if names is not None and (
+    if (
         not isinstance(names, list)
         or len(names) != dof
         or any(not isinstance(name, str) or not name for name in names)
         or len(set(names)) != dof
     ):
         raise ValueError("joint_names must uniquely identify every joint column")
+    validated_joint_names(names, dof)
     for _, _, _, _, sample, _ in validated:
         if "joint_names" in sample and sample["joint_names"] != names:
             raise ValueError(
@@ -451,6 +453,7 @@ def import_captures(
         np.asarray(poses),
         ObservationFrame.CAMERA_T_TARGET,
         np.asarray(accepted_ids),
+        tuple(names),
     )
     report["dataset_written"] = True
     report["dataset_file"] = output_path.name

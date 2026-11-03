@@ -548,7 +548,7 @@ def test_inspect_command_writes_coverage_and_hash(tmp_path: Path) -> None:
 
     report = json.loads(output_path.read_text())
     assert report["samples"] == 20
-    assert report["dataset_schema_version"] == 1
+    assert report["dataset_schema_version"] == 2
     assert report["legacy_dataset_schema"] is False
     assert len(report["dataset_sha256"]) == 64
     assert len(report["quality_warnings"]) == 4
@@ -829,11 +829,11 @@ def test_upgrade_dataset_adds_schema_and_manifest(tmp_path: Path) -> None:
     )
 
     with np.load(output, allow_pickle=False) as archive:
-        assert archive["schema_version"].item() == 1
+        assert archive["schema_version"].item() == 2
         np.testing.assert_array_equal(archive["sample_indices"], [0, 1, 2])
     report = json.loads(manifest.read_text())
     assert report["source_schema_version"] is None
-    assert report["output_schema_version"] == 1
+    assert report["output_schema_version"] == 2
     assert report["source_dataset_sha256"] != report["output_dataset_sha256"]
 
 

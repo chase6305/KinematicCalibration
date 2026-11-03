@@ -268,7 +268,7 @@ def _inspect(args: argparse.Namespace) -> int:
     summary = dataset.get_summary()
     dataset_schema_version = read_dataset_schema_version(args.dataset)
     summary["dataset_schema_version"] = dataset_schema_version
-    summary["legacy_dataset_schema"] = dataset_schema_version is None
+    summary["legacy_dataset_schema"] = dataset_schema_version != DATASET_SCHEMA_VERSION
     summary["dataset_sha256"] = _sha256(args.dataset)
     warnings = dataset.get_quality_warnings(
         min_joint_span_rad=args.min_joint_span,
@@ -361,6 +361,7 @@ def _split_dataset(args: argparse.Namespace) -> int:
             dataset.observed_poses[indices],
             dataset.observation_frame,
             dataset.sample_indices[indices],
+            dataset.joint_names,
         )
 
     best_candidate = None
@@ -508,6 +509,7 @@ def _deduplicate_dataset(args: argparse.Namespace) -> int:
         dataset.observed_poses[kept_positions],
         dataset.observation_frame,
         dataset.sample_indices[kept_positions],
+        dataset.joint_names,
     )
     cleaned.save(args.output)
     manifest = {
@@ -722,6 +724,7 @@ def _solve(args: argparse.Namespace) -> int:
         "backend": np.asarray(model.backend),
         "base_link": np.asarray(model.base_link),
         "joint_names": np.asarray(model.joint_names),
+        "joint_identity_verified": np.asarray(fit.joint_identity["verified"]),
         "parameter_type": np.asarray("kinematic-poe"),
         "screw_axes": np.asarray(screw_axes),
         "zero_configuration_pose": np.asarray(zero_pose.A),
@@ -771,6 +774,8 @@ def _solve(args: argparse.Namespace) -> int:
         "backend": model.backend,
         "base_link": model.base_link,
         "joint_names": list(model.joint_names),
+        "joint_identity_verified": fit.joint_identity["verified"],
+        "joint_identity": fit.joint_identity,
         "model_mode": "self-calibrating" if self_calibrating else "robot-body",
         "observation_frame": dataset.observation_frame.value,
         "source_observation_frame": source_observation_frame,
@@ -948,6 +953,11 @@ def _zero_offset(args: argparse.Namespace) -> int:
             f"selected chain has {len(selected_links)} joints but dataset has "
             f"{dataset.joint_positions.shape[1]} columns"
         )
+    joint_identity = dataset.check_joint_identity(
+        [joint_names_by_child.get(link.name, link.name) for link in selected_links]
+    )
+    if not joint_identity["verified"]:
+        LOGGER.warning("%s", joint_identity["reason"])
     dataset.validate_solver_sample_count()
 
     camera_t_base = None
@@ -1163,6 +1173,8 @@ def _zero_offset(args: argparse.Namespace) -> int:
         "estimated_camera_T_base": _jsonable(result["camera_t_base"]),
         "estimated_EE_T_target": _jsonable(result["ee_t_target"]),
         "dataset_sha256": _sha256(args.dataset),
+        "joint_identity_verified": joint_identity["verified"],
+        "joint_identity": joint_identity,
         "dataset_schema_version": dataset_schema_version,
         "urdf_sha256": _sha256(args.urdf),
     }
@@ -1848,6 +1860,21 @@ def _verify_result(args: argparse.Namespace) -> int:
                     or names.tolist() != report.get("joint_names")
                 ):
                     raise ValueError("parameter joint identities do not match result")
+            parameter_identity_verified = None
+            if "joint_identity_verified" in archive.files:
+                value = archive["joint_identity_verified"]
+                if value.shape != () or value.dtype.kind != "b":
+                    raise ValueError(
+                        "parameter joint_identity_verified must be a boolean scalar"
+                    )
+                parameter_identity_verified = value.item()
+                if (
+                    report.get("joint_identity_verified")
+                    is not parameter_identity_verified
+                ):
+                    raise ValueError(
+                        "parameter joint identity verification does not match result"
+                    )
             for archive_field, report_field in (
                 ("source_base_T_camera_sha256", "base_T_camera_sha256"),
                 ("source_EE_T_target_sha256", "ee_T_target_sha256"),
@@ -1891,6 +1918,18 @@ def _verify_result(args: argparse.Namespace) -> int:
         if report.get("dof") != len(screw_axes):
             raise ValueError("parameter screw-axis count does not match result DOF")
         source_dataset = KinematicDataset.load(args.dataset)
+        identity = source_dataset.check_joint_identity(report.get("joint_names"))
+        if (
+            parameter_identity_verified is not None
+            and identity["verified"] is not parameter_identity_verified
+        ):
+            raise ValueError(
+                "parameter joint identity verification does not match source dataset"
+            )
+        if "joint_identity" in report and report["joint_identity"] != identity:
+            raise ValueError(
+                "result joint identity details do not match source dataset"
+            )
         if source_observation_frame != source_dataset.observation_frame.value:
             raise ValueError(
                 "parameter source observation frame does not match dataset"
@@ -2043,6 +2082,11 @@ def _verify_split(args: argparse.Namespace) -> int:
     source = KinematicDataset.load(args.source)
     train = KinematicDataset.load(args.train)
     validation = KinematicDataset.load(args.validation)
+    if (
+        train.joint_names != source.joint_names
+        or validation.joint_names != source.joint_names
+    ):
+        raise ValueError("split datasets did not preserve source joint_names")
     train_indices = manifest.get("train_indices")
     validation_indices = manifest.get("validation_indices")
     for name, indices in (
@@ -2130,6 +2174,7 @@ def _verify_split(args: argparse.Namespace) -> int:
                 source.observed_poses[indices],
                 source.observation_frame,
                 source.sample_indices[indices],
+                source.joint_names,
             )
 
         candidate_train = candidate_subset(candidate_train_indices)
@@ -2260,6 +2305,8 @@ def _verify_deduplication(args: argparse.Namespace) -> int:
     for field, expected in expected_fields.items():
         if manifest.get(field) != expected:
             raise ValueError(f"deduplication manifest has inconsistent {field}")
+    if output.joint_names != source.joint_names:
+        raise ValueError("deduplicated joint_names differ from source")
     if output.observation_frame != source.observation_frame:
         raise ValueError("deduplicated observation frame differs from source")
     if not np.array_equal(
@@ -2469,6 +2516,14 @@ def _validate_result(args: argparse.Namespace) -> int:
                 model_context[field] = (
                     value.tolist() if field == "joint_names" else value.item()
                 )
+        training_identity_verified = None
+        if "joint_identity_verified" in archive.files:
+            value = archive["joint_identity_verified"]
+            if value.shape != () or value.dtype.kind != "b":
+                raise ValueError(
+                    "parameter joint_identity_verified must be a boolean scalar"
+                )
+            training_identity_verified = value.item()
 
     if source_sample_sha256 is not None:
         if source_sample_sha256.ndim != 1:
@@ -2493,6 +2548,14 @@ def _validate_result(args: argparse.Namespace) -> int:
                 raise ValueError(
                     f"parameter NPZ {field} does not match calibration result"
                 )
+        if (
+            training_identity_verified is not None
+            and calibration_report.get("joint_identity_verified")
+            is not training_identity_verified
+        ):
+            raise ValueError(
+                "parameter joint identity verification does not match calibration result"
+            )
         if calibration_report.get("model_mode") != model_mode:
             raise ValueError(
                 "parameter NPZ model mode does not match calibration result"
@@ -2532,6 +2595,16 @@ def _validate_result(args: argparse.Namespace) -> int:
         )
 
     dataset = KinematicDataset.load(args.dataset)
+    validation_identity = dataset.check_joint_identity(model_context.get("joint_names"))
+    joint_identity_verified = (
+        validation_identity["verified"] and training_identity_verified is True
+    )
+    if not validation_identity["verified"]:
+        LOGGER.warning("validation %s", validation_identity["reason"])
+    if training_identity_verified is not True:
+        LOGGER.warning(
+            "training joint-column identity is unverified in saved parameters"
+        )
     validation_sample_sha256 = _dataset_sample_sha256(dataset)
     validation_dataset_coverage = dataset.get_summary()
     raw_validation_coverage_failures = dataset.get_quality_warnings(
@@ -2673,6 +2746,9 @@ def _validate_result(args: argparse.Namespace) -> int:
         "accepted": accepted,
         "numerically_accepted": numerically_accepted,
         "parameter_acceptance_verified": calibration_report is not None,
+        "joint_identity_verified": joint_identity_verified,
+        "validation_joint_identity": validation_identity,
+        "training_joint_identity_verified": training_identity_verified,
         "calibration_result": (
             str(calibration_result_path) if calibration_report is not None else None
         ),

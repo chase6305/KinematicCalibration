@@ -14,7 +14,7 @@
   nominal FK pose as an independent measurement when assessing calibration.
 - Tests: `env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q`.
   This avoids unrelated ROS plugins in the shared workspace. Lint:
-  `.venv/bin/ruff check src tests`; build: `.venv/bin/python -m build`.
+  `.venv/bin/ruff check src tests scripts benchmarks`; build: `.venv/bin/python -m build`.
 - Preserve user modifications in reference repositories. Update the pinned
   `third_party/HandEyeCalibrationToolkit` gitlink intentionally; no auto-fetch or
   auto-build during normal imports. Never include generated captures or caches.

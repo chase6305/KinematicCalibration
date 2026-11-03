@@ -85,12 +85,14 @@ def load_calibration_model(
         for joint in root.findall("joint")
         if joint.find("child") is not None
     }
+    names = tuple(by_child.get(joint.name, joint.name) for joint in calibrator.joints)
+    calibrator.joint_names = names
     return CalibrationModel(
         calibrator,
         backend,
         robot.base_link.name,
         calibrator.ee_name,
-        tuple(by_child.get(joint.name, joint.name) for joint in calibrator.joints),
+        names,
         int(robot.n),
         True,
     )

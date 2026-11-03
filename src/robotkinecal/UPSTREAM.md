@@ -23,3 +23,11 @@ unavailable uncertainty instead of false certainty from a pseudoinverse. A stabl
 SE(3) logarithm uses SciPy rotation vectors and a half-angle inverse left
 Jacobian near pi; independent matrix-exponential tests verify its linear/angular
 convention, small-angle limit, and large-translation behavior.
+
+The second-stage performance change adds `_batch.py`, array terminal FK and
+adjoint regressor APIs, and shared-prefix batched linearization/residuals in
+`solve`. The scalar `forward_kinematics`, `A_Matrix`, `Q_Matrix`, and `_pose_log`
+remain as independent references. Equivalence tests cover arbitrary axes,
+zero/pi angles, updates/reset, pose/point switching, and full optimization with
+a scalar substitute. Reproducible profiles and before/after results are recorded
+in `docs/performance.md` and `benchmarks/profile_solver.py`.

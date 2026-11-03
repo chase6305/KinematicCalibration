@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -249,6 +250,7 @@ def run_experiment(
             raw_validation.observed_poses,
             raw_validation.observation_frame,
             np.arange(samples, samples + validation_samples),
+            raw_validation.joint_names,
         )
         axes, home = nominal.poe_parameters()
         calibrator = SerialRobotKineCal.from_screw_axes(
@@ -285,6 +287,11 @@ def run_experiment(
             "validation_seed": seed + 2,
             "dof": nominal.dof,
             "joint_names": list(nominal.joint_names),
+            "joint_identity_verified": True,
+            "joint_identity": {
+                "training": fitted.joint_identity,
+                "validation": validation.check_joint_identity(nominal.joint_names),
+            },
             "base_link": nominal.base_link,
             "end_link": nominal.end_link,
             "training_samples": samples,
@@ -508,6 +515,26 @@ def load_experiment(path: Path | str) -> tuple[dict, KinematicDataset, dict]:
         or model["joint_names"].tolist() != names
     ):
         raise ValueError("model joint identities do not match experiment")
+    joint_identity = {
+        "training": train.check_joint_identity(names),
+        "validation": dataset.check_joint_identity(names),
+    }
+    identity_verified = all(item["verified"] for item in joint_identity.values())
+    if (
+        "joint_identity_verified" in report
+        and report["joint_identity_verified"] is not identity_verified
+    ):
+        raise ValueError(
+            "report joint-column verification does not match saved datasets"
+        )
+    if "joint_identity" in report and report["joint_identity"] != joint_identity:
+        raise ValueError("report joint identity details do not match saved datasets")
+    report["joint_identity_verified"] = identity_verified
+    report["joint_identity"] = joint_identity
+    if not identity_verified:
+        logging.getLogger(__name__).warning(
+            "legacy experiment datasets have no joint_names; column identity is unverified"
+        )
     for key in ("base_link", "end_link"):
         if (
             not isinstance(report.get(key), str)

@@ -13,9 +13,9 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -e '.[dev,vision,visualization]'
       - run: python -m pytest -q
-      - run: ruff check src tests
+      - run: ruff check src tests scripts benchmarks
       - run: python -m build
-      - run: kincal demo --samples 30 --validation-samples 12 --output outputs/ci
+      - run: kincal demo --samples 30 --validation-samples 12 --position-noise-m 0 --orientation-noise-rad 0 --output outputs/ci
   robotics-adapter:
     runs-on: ubuntu-latest
     steps:

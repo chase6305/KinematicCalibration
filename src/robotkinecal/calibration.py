@@ -9,7 +9,8 @@ import numpy as np
 from numpy.linalg import norm
 from scipy.spatial.transform import Rotation
 from spatialmath import SE3, Twist3
-from spatialmath.base import skew
+
+from ._batch import evaluate_poe_batch, pose_log_batch, skew_batch
 
 if TYPE_CHECKING:
     import roboticstoolbox as rtb
@@ -738,6 +739,12 @@ class SerialRobotKineCal:
 
         self._observations = normalized_observations
         self._joint_positions = normalized_joint_positions
+        self._joint_positions_array = np.asarray(normalized_joint_positions)
+        self._observation_array = np.asarray(
+            normalized_observations
+            if self.position_only
+            else [pose.A for pose in normalized_observations]
+        )
         # Reloading observations may switch between 3D points and 6D poses.
         # The basis matrix embeds OBS_SIZE and must be rebuilt in that case.
         self._B_Matrix = None
@@ -781,6 +788,51 @@ class SerialRobotKineCal:
             T *= self.zero_conf_EE_pose
 
         return T
+
+    def _batch_joint_positions(self, joint_positions):
+        positions = _real_array(joint_positions, "joint_positions")
+        if (
+            positions.ndim != 2
+            or positions.shape[1] != self.N_JOINTS
+            or not len(positions)
+            or not np.all(np.isfinite(positions))
+        ):
+            raise ValueError(
+                f"joint_positions must be a finite non-empty (N, {self.N_JOINTS}) array."
+            )
+        return positions
+
+    def _model_batch(self, joint_positions, *, with_regressor=False):
+        return evaluate_poe_batch(
+            self.joint_screw_axis,
+            self.zero_conf_EE_pose.A,
+            joint_positions,
+            self.B_Matrix() if with_regressor else None,
+            self.OBS_SIZE if with_regressor else 6,
+        )
+
+    def forward_kinematics_batch(self, joint_positions):
+        """Return terminal ``Base_T_EE`` transforms for an ``(N, DOF)`` array.
+
+        This is equivalent to stacking ``forward_kinematics(N_JOINTS+1, q)``
+        without creating a SpatialMath object for every intermediate transform.
+        The return shape is ``(N, 4, 4)`` and no observation data is needed.
+        """
+        positions = self._batch_joint_positions(joint_positions)
+        return self._model_batch(positions)[0]
+
+    def regressor_blocks(self, joint_positions):
+        """Return spatial adjoint blocks equivalent to stacked ``A_Matrix``.
+
+        Call ``set_observations`` first to choose 3D point or 6D pose parameter
+        dimensions. The return shape is ``(N, 6, 4*DOF+OBS_SIZE)``; point-only
+        endpoint projection is applied separately by the solver, as in the
+        scalar reference implementation. No cache survives a model update.
+        """
+        if not hasattr(self, "OBS_SIZE"):
+            raise RuntimeError("Call set_observations() before building regressors.")
+        positions = self._batch_joint_positions(joint_positions)
+        return self._model_batch(positions, with_regressor=True)[1]
 
     def update_twist_definitions(
         self, param_corrections: np.ndarray, step_size: float = 1.0
@@ -938,19 +990,43 @@ class SerialRobotKineCal:
 
     def _twist_error_vector(self):
         """Return the stacked residual vector for the current model state."""
-        errors = np.zeros((self.OBS_SIZE * self.N_OBSERVATIONS, 1))
-        for index, (joint_positions, observation) in enumerate(
-            zip(self._joint_positions, self._observations)
-        ):
-            model_pose = self.forward_kinematics(self.N_JOINTS + 1, joint_positions)
-            if self.position_only:
-                error = observation - model_pose.t
-            else:
-                error = _pose_log(observation @ model_pose.inv())
-            errors[self.OBS_SIZE * index : self.OBS_SIZE * (index + 1)] = error.reshape(
-                (self.OBS_SIZE, 1)
-            )
-        return errors
+        poses = self._model_batch(self._joint_positions_array)[0]
+        return self._residual_batch(poses).reshape(-1, 1)
+
+    def _residual_batch(self, model_poses):
+        if self.position_only:
+            return self._observation_array - model_poses[:, :3, 3]
+        rotations = self._observation_array[:, :3, :3] @ model_poses[
+            :, :3, :3
+        ].transpose(0, 2, 1)
+        translations = self._observation_array[:, :3, 3] - np.einsum(
+            "nij,nj->ni", rotations, model_poses[:, :3, 3]
+        )
+        return pose_log_batch(rotations, translations)
+
+    def _linearization(self):
+        poses, blocks = self._model_batch(
+            self._joint_positions_array, with_regressor=True
+        )
+        residuals = self._residual_batch(poses)
+        observed_positions = (
+            self._observation_array
+            if self.position_only
+            else self._observation_array[:, :3, 3]
+        )
+        position_errors = np.linalg.norm(observed_positions - poses[:, :3, 3], axis=1)
+        if self.position_only:
+            # Endpoint projection [I, -skew(p)] from Eq. (26).
+            blocks = blocks[:, :3] - skew_batch(poses[:, :3, 3]) @ blocks[:, 3:]
+            orientation_errors = np.zeros(self.N_OBSERVATIONS)
+        else:
+            orientation_errors = np.linalg.norm(residuals[:, 3:], axis=1)
+        return (
+            residuals.reshape(-1, 1),
+            blocks.reshape(self.OBS_SIZE * self.N_OBSERVATIONS, self.N_PARAMS),
+            position_errors.tolist(),
+            orientation_errors.tolist(),
+        )
 
     def _model_snapshot(self):
         """Capture mutable calibration state for a recoverable trial update."""
@@ -1047,57 +1123,7 @@ class SerialRobotKineCal:
 
         # Iterative least squares
         for it in range(max_iterations):
-            y_all = np.zeros((self.OBS_SIZE * self.N_OBSERVATIONS, 1))
-            A_all = np.ndarray((self.OBS_SIZE * self.N_OBSERVATIONS, self.N_PARAMS))
-
-            # Lists to store the position and orientation errors
-            position_errors = []
-            orientation_errors = []
-
-            # Iterate over all observations
-            for m in range(self.N_OBSERVATIONS):
-                # End effector pose according to the observation
-                obs_ee_pose = self._observations[m]
-
-                # Joint positions as recorded by the robot
-                joint_pos = self._joint_positions[m]
-
-                # End effector pose according to the model
-                mod_ee_pose = self.forward_kinematics(self.N_JOINTS + 1, joint_pos)
-
-                if self.position_only:
-                    # EE position error vector
-                    y = obs_ee_pose - mod_ee_pose.t
-                else:
-                    # Pose difference between observed and predicted end effector poses
-                    pose_diff = obs_ee_pose @ mod_ee_pose.inv()
-
-                    # EE twist error vector
-                    y = _pose_log(pose_diff)
-
-                # Record position/orientation errors for convergence detection
-                if self.position_only:
-                    position_error = np.linalg.norm(y)
-                    orientation_error = 0
-                else:
-                    position_error = np.linalg.norm(obs_ee_pose.t - mod_ee_pose.t)
-                    orientation_error = norm(y[3:])
-
-                position_errors.append(position_error)
-                orientation_errors.append(orientation_error)
-
-                # Jacobian matrix
-                A = self.A_Matrix(joint_pos)
-
-                if self.position_only:
-                    # Eq. (26) in the paper
-                    A = np.block([np.eye(3), -skew(mod_ee_pose.t)]) @ A
-
-                # Populate the y_all and A_all matrices
-                y_all[self.OBS_SIZE * m : self.OBS_SIZE * (m + 1)] = y.reshape(
-                    (self.OBS_SIZE, 1)
-                )
-                A_all[self.OBS_SIZE * m : self.OBS_SIZE * (m + 1), :] = A
+            y_all, A_all, position_errors, orientation_errors = self._linearization()
 
             if self.position_only:
                 row_weights = np.full(

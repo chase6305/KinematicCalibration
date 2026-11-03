@@ -66,6 +66,27 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--characteristic-length-m", type=float, default=1.0)
     plan.add_argument("--output", type=Path, required=True)
     plan.add_argument("--force", action="store_true")
+    image_demo = commands.add_parser(
+        "image-demo", help="Render target images, detect poses, and calibrate"
+    )
+    image_demo.add_argument("--output", type=Path, default=Path("outputs/image-demo"))
+    image_demo.add_argument("--urdf", type=Path)
+    image_demo.add_argument("--end-link", default="ee_link")
+    image_demo.add_argument("--base-link")
+    image_demo.add_argument("--samples", type=int, default=50)
+    image_demo.add_argument("--validation-samples", type=int, default=20)
+    image_demo.add_argument("--seed", type=int, default=42)
+    image_demo.add_argument(
+        "--board", choices=("opencv-acircle", "cctag-multi"), default="opencv-acircle"
+    )
+    image_demo.add_argument(
+        "--measurement-mode", choices=("image", "external-centers"), default="image"
+    )
+    image_demo.add_argument("--rgb-noise-std", type=float, default=0.5)
+    image_demo.add_argument("--blur-sigma-px", type=float, default=0.3)
+    image_demo.add_argument("--supersample", type=int, default=2)
+    image_demo.add_argument("--max-candidates", type=int, default=10000)
+    image_demo.add_argument("--max-iterations", type=int, default=30)
     return parser
 
 
@@ -93,10 +114,38 @@ def main(argv=None) -> int:
             print(json.dumps(report, indent=2, allow_nan=False))
             return 0 if report["accepted"] else 1
         elif args.command == "inspect":
-            from .experiment import load_experiment
+            manifest = json.loads((args.experiment / "manifest.json").read_text())
+            if manifest.get("artifact_type") == "image-kinematic-experiment":
+                from .image_simulation import load_image_experiment
 
-            report, _, _ = load_experiment(args.experiment)
+                report, _, _ = load_image_experiment(args.experiment)
+            else:
+                from .experiment import load_experiment
+
+                report, _, _ = load_experiment(args.experiment)
             print(json.dumps(report, indent=2, allow_nan=False))
+        elif args.command == "image-demo":
+            from .image_simulation import ImageNoise, run_image_experiment
+            from .targets import get_board_config
+
+            report = run_image_experiment(
+                args.output,
+                urdf=args.urdf,
+                end_link=args.end_link,
+                base_link=args.base_link,
+                samples=args.samples,
+                validation_samples=args.validation_samples,
+                seed=args.seed,
+                board=get_board_config(args.board),
+                measurement_mode=args.measurement_mode,
+                noise=ImageNoise(
+                    args.rgb_noise_std, args.blur_sigma_px, args.supersample
+                ),
+                max_candidates=args.max_candidates,
+                max_iterations=args.max_iterations,
+            )
+            print(json.dumps(report, indent=2, allow_nan=False))
+            return 0 if report["accepted"] else 1
         elif args.command == "import-captures":
             from .acquisition import import_captures
 
@@ -126,6 +175,7 @@ def main(argv=None) -> int:
                 force=args.force,
             )
             print(json.dumps(report, indent=2, allow_nan=False))
+            return 0 if report["full_rank"] else 1
         elif args.command == "view":
             from .backends.viser import create_viewer
 

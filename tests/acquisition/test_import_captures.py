@@ -193,6 +193,7 @@ def test_actual_circle_grid_image_is_decoded_detected_and_measured(tmp_path):
         "camera_matrix": [[1500, 0, 450], [0, 1500, 360], [0, 0, 1]],
         "distortion": [0, 0, 0, 0, 0],
         "board_type": "opencv-acircle",
+        "joint_names": ["joint_1", "joint_2"],
         "samples": [
             {
                 "sample_id": 41,
@@ -341,3 +342,16 @@ def test_ambiguous_planar_pose_is_reported_and_rejected_even_with_low_rms(
     assert row["reprojection_rms_px"] == 0.1
     assert row["pose_diagnostics"] == diagnostics
     assert "ambiguous" in row["rejection_reasons"][0]
+
+
+def test_import_requires_and_preserves_declared_joint_column_names(tmp_path):
+    path, manifest, _ = _manifest(tmp_path)
+    output = tmp_path / "named.npz"
+    dataset, _ = import_captures(path, output)
+    assert dataset.joint_names == tuple(manifest["joint_names"])
+    assert KinematicDataset.load(output).joint_names == dataset.joint_names
+    manifest.pop("joint_names")
+    _write(path, manifest)
+    with pytest.raises(ValueError, match="joint_names"):
+        import_captures(path, tmp_path / "missing-names.npz")
+    assert not (tmp_path / "missing-names.npz").exists()

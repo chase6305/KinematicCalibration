@@ -145,12 +145,18 @@ def test_ur10_cli_export_matches_independent_truth_fk(tmp_path, capsys):
     poses = np.asarray([truth.forward(q) for q in joints])
     train = tmp_path / "train.npz"
     validation = tmp_path / "validation.npz"
-    KinematicDataset(joints[:30], poses[:30], ObservationFrame.BASE_T_EE).save(train)
+    KinematicDataset(
+        joints[:30],
+        poses[:30],
+        ObservationFrame.BASE_T_EE,
+        joint_names=nominal.joint_names,
+    ).save(train)
     KinematicDataset(
         joints[30:],
         poses[30:],
         ObservationFrame.BASE_T_EE,
         np.arange(30, 40),
+        nominal.joint_names,
     ).save(validation)
     parameters = tmp_path / "fit.npz"
     report = parameters.with_suffix(".json")
