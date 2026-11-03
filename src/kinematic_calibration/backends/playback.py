@@ -16,8 +16,8 @@ class PoseState:
     links: dict[str, dict[str, np.ndarray]]
     poses: dict[str, np.ndarray]
     measured_pose: np.ndarray | None
-    position_error_m: float
-    orientation_error_rad: float
+    position_error_m: float | None
+    orientation_error_rad: float | None
     error_reference: str
     sample_index: int | None
 

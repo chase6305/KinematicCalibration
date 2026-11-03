@@ -23,6 +23,7 @@ from .dataset import (
     minimum_full_pose_samples,
     read_dataset_schema_version,
 )
+from .dataset import sample_sha256 as _dataset_sample_sha256
 from .io_utils import (
     atomic_save_npy,
     atomic_savez_compressed,
@@ -97,21 +98,6 @@ def _json_dumps_fixed(value, *, indent: int = 2) -> str:
         raise TypeError(f"unsupported fixed-format JSON value: {type(item).__name__}")
 
     return render(_jsonable(value), 0) + "\n"
-
-
-def _dataset_sample_sha256(dataset: KinematicDataset) -> np.ndarray:
-    """Fingerprint each synchronized observation independent of NPZ encoding."""
-    hashes = []
-    frame = dataset.observation_frame.value.encode("utf-8")
-    for joints, pose in zip(
-        dataset.joint_positions, dataset.observed_poses, strict=True
-    ):
-        digest = hashlib.sha256()
-        digest.update(frame)
-        digest.update(np.asarray(joints, dtype="<f8").tobytes())
-        digest.update(np.asarray(pose, dtype="<f8").tobytes())
-        hashes.append(digest.hexdigest())
-    return np.asarray(hashes)
 
 
 def _solver_dataset_quality(

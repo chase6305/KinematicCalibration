@@ -1,4 +1,4 @@
-"""Optional browser visualization for portable headless experiments."""
+"""Optional browser replay of experiments and recorded calibration data."""
 
 import json
 from pathlib import Path
@@ -27,6 +27,36 @@ def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int 
     Robot skeletons come from URDF geometry. Calibrated endpoint predictions
     come from the fitted POE, so the overlay displays numerical model outputs.
     """
+    return _create_viewer(ExperimentPlayback(experiment), host=host, port=port)
+
+
+def create_fitted_viewer(
+    parameters: Path | str,
+    dataset: Path | str,
+    urdf: Path | str,
+    *,
+    result: Path | str | None = None,
+    base_t_camera: Path | str | None = None,
+    ee_t_target: Path | str | None = None,
+    host: str = "127.0.0.1",
+    port: int = 8080,
+):
+    """Replay fitted parameters against recorded data without inventing truth."""
+    from .measured import MeasuredPlayback
+
+    playback = MeasuredPlayback(
+        parameters,
+        dataset,
+        urdf,
+        result=result,
+        base_t_camera=base_t_camera,
+        ee_t_target=ee_t_target,
+    )
+    return _create_viewer(playback, host=host, port=port)
+
+
+def _create_viewer(playback, *, host: str, port: int):
+    """Render either playback source; measured data has no truth or target mesh."""
     try:
         import viser
     except ImportError as exc:
@@ -34,16 +64,20 @@ def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int 
             "Viser is optional; install 'kinematic-calibration[visualization]'"
         ) from exc
 
-    playback = ExperimentPlayback(experiment)
     report, dataset, model = playback.report, playback.dataset, playback.model
     nominal = playback.nominal
-    image_experiment = report.get("experiment_type") == "image-kinematic-calibration"
+    synthetic = "truth_predictions" in model
+    image_experiment = (
+        synthetic and report.get("experiment_type") == "image-kinematic-calibration"
+    )
+    board_mesh = None
+    ee_t_board = None
     if image_experiment:
         import trimesh
         from PIL import Image
 
         board = BoardConfig(**report["board_geometry"])
-        with Image.open(Path(experiment) / "board.png") as texture:
+        with Image.open(playback.path / "board.png") as texture:
             board_mesh = trimesh.Trimesh(
                 vertices=board.corners,
                 faces=[[0, 2, 1], [0, 3, 2]],
@@ -54,23 +88,40 @@ def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int 
                 process=False,
             )
         ee_t_board = model["ee_T_board"]
-    else:
+    elif synthetic:
         board = get_board_config()
         board_mesh = board.mesh()
         ee_t_board = np.eye(4)
+    coordinate_frame = report.get("coordinate_frame", "base")
+    camera_coordinates = coordinate_frame == "camera"
     server = viser.ViserServer(host=host, port=port, label="Kinematic Calibration")
-    server.scene.set_up_direction("+z")
-    server.scene.add_grid("/grid", width=3, height=3)
-    _frame(server.scene, "/base", np.eye(4), 0.2)
+    # OpenCV optical coordinates have Y down; robot-base coordinates have Z up.
+    server.scene.set_up_direction("-y" if camera_coordinates else "+z")
+    server.scene.add_grid(
+        "/grid", width=3, height=3, plane="xz" if camera_coordinates else "xy"
+    )
+    _frame(server.scene, f"/{coordinate_frame}", np.eye(4), 0.2)
     if image_experiment:
         _frame(server.scene, "/camera", model["base_T_camera"], 0.15)
+    elif "camera_T_base_initialization" in model:
+        _frame(
+            server.scene,
+            "/nominal_base_initialization",
+            model["camera_T_base_initialization"],
+            0.15,
+        )
     palette = {
         "nominal": (230, 155, 60),
         "truth": (60, 190, 130),
         "calibrated": (70, 140, 255),
         "measured": (235, 90, 120),
     }
-    for name in ("nominal", "truth", "calibrated"):
+    prediction_names = tuple(
+        name
+        for name in ("nominal", "truth", "calibrated")
+        if f"{name}_predictions" in model
+    )
+    for name in prediction_names:
         server.scene.add_point_cloud(
             f"/poses/{name}",
             points=model[f"{name}_predictions"][:, :3, 3],
@@ -85,8 +136,8 @@ def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int 
     )
     display_points = np.vstack(
         [
-            model["truth_predictions"][:, :3, 3],
-            model["nominal_predictions"][:, :3, 3],
+            *(model[f"{name}_predictions"][:, :3, 3] for name in prediction_names),
+            dataset.observed_poses[:, :3, 3],
             np.zeros((1, 3)),
         ]
     )
@@ -99,20 +150,36 @@ def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int 
 
     @server.on_client_connect
     def initialize_camera(client):
-        client.camera.position = center + np.array([1.7, -2.2, 1.5]) * radius
+        offset = [1.7, -1.5, -2.2] if camera_coordinates else [1.7, -2.2, 1.5]
+        client.camera.position = center + np.array(offset) * radius
         client.camera.look_at = center
-        client.camera.up_direction = (0.0, 0.0, 1.0)
+        client.camera.up_direction = (
+            (0.0, -1.0, 0.0) if camera_coordinates else (0.0, 0.0, 1.0)
+        )
         client.camera.fov = np.deg2rad(45.0)
 
-    server.gui.add_markdown(
+    legend = "Orange: nominal · "
+    if synthetic:
+        legend += "Green: truth · "
+    legend += "Blue: calibrated · Pink: measured"
+    role = report.get("data_role", "held-out")
+    summary = (
         "**Kinematic calibration**\n\n"
-        "Orange: nominal · Green: truth · Blue: calibrated · Pink: measured\n\n"
-        f"Held-out position RMSE: {report['nominal_vs_measurements']['position_rmse_m'] * 1000:.3f} "
+        f"{legend}\n\n"
+        f"{role.capitalize()} position RMSE: {report['nominal_vs_measurements']['position_rmse_m'] * 1000:.3f} "
         f"→ {report['calibrated_vs_measurements']['position_rmse_m'] * 1000:.3f} mm\n\n"
         f"Termination: `{report['termination_reason']}`"
     )
+    if not synthetic:
+        summary += (
+            f"\n\nCoordinates: {coordinate_frame} · "
+            f"Stored fit accepted: {report['accepted']}"
+        )
+        if report.get("display_note"):
+            summary += f"\n\n{report['display_note']}"
+    server.gui.add_markdown(summary)
     slider = server.gui.add_slider(
-        "Validation pose",
+        "Validation pose" if synthetic else "Recorded pose",
         min=0,
         max=len(dataset.joint_positions) - 1,
         step=1,
@@ -134,12 +201,17 @@ def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int 
                 )
             )
     error = server.gui.add_markdown("")
-    show_board = server.gui.add_checkbox("Show calibration target", initial_value=True)
-    board_handle = server.scene.add_mesh_trimesh("/target", board_mesh)
+    show_board = None
+    board_handle = None
+    if board_mesh is not None:
+        show_board = server.gui.add_checkbox(
+            "Show calibration target", initial_value=True
+        )
+        board_handle = server.scene.add_mesh_trimesh("/target", board_mesh)
     preview = None
     validation_frames = []
     if image_experiment and report["measurement_model"] == "rendered-image-detection":
-        capture = Path(experiment) / "captures/validation"
+        capture = playback.path / "captures/validation"
         validation_frames = json.loads((capture / "manifest.json").read_text())[
             "samples"
         ]
@@ -163,11 +235,11 @@ def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int 
                     colors=palette[name],
                     thickness=0.012,
                 )
-            for name in ("nominal", "truth", "calibrated"):
+            for name, pose in state.poses.items():
                 _frame(
                     server.scene,
                     f"/current/{name}",
-                    state.poses[name],
+                    pose,
                 )
             measured_frame = _frame(
                 server.scene,
@@ -176,12 +248,13 @@ def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int 
                 0.055,
             )
             measured_frame.visible = state.measured_pose is not None
-            board_pose = state.poses["truth"] @ ee_t_board
-            board_handle.position = board_pose[:3, 3]
-            board_handle.wxyz = Rotation.from_matrix(board_pose[:3, :3]).as_quat()[
-                [3, 0, 1, 2]
-            ]
-            board_handle.visible = show_board.value
+            if board_handle is not None:
+                board_pose = state.poses["truth"] @ ee_t_board
+                board_handle.position = board_pose[:3, 3]
+                board_handle.wxyz = Rotation.from_matrix(board_pose[:3, :3]).as_quat()[
+                    [3, 0, 1, 2]
+                ]
+                board_handle.visible = show_board.value
             if preview is not None:
                 preview.visible = not manual_mode.value
                 if preview.visible:
@@ -189,10 +262,13 @@ def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int 
                         capture / validation_frames[index]["image"]
                     ) as frame:
                         preview.image = np.asarray(frame.convert("RGB"))
-            error.content = (
-                f"Model vs {state.error_reference}: **{state.position_error_m * 1000:.3f} mm**, "
-                f"**{np.rad2deg(state.orientation_error_rad):.4f}°**"
-            )
+            if state.position_error_m is None or state.orientation_error_rad is None:
+                error.content = "No measurement for this configuration."
+            else:
+                error.content = (
+                    f"Model vs {state.error_reference}: **{state.position_error_m * 1000:.3f} mm**, "
+                    f"**{np.rad2deg(state.orientation_error_rad):.4f}°**"
+                )
 
     def change_mode(_event):
         with server.atomic():
@@ -206,7 +282,8 @@ def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int 
         update()
 
     slider.on_update(update)
-    show_board.on_update(update)
+    if show_board is not None:
+        show_board.on_update(update)
     manual_mode.on_update(change_mode)
     for joint in joint_sliders:
         joint.on_update(update)

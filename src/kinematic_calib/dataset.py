@@ -1,5 +1,6 @@
 """Validated interchange format for kinematic-calibration observations."""
 
+import hashlib
 from dataclasses import dataclass
 from enum import Enum
 from math import ceil
@@ -53,6 +54,21 @@ class ObservationFrame(str, Enum):
 
     BASE_T_EE = "base_T_ee"
     CAMERA_T_TARGET = "camera_T_target"
+
+
+def sample_sha256(dataset: "KinematicDataset") -> np.ndarray:
+    """Fingerprint synchronized observations independently of NPZ encoding."""
+    hashes = []
+    frame = dataset.observation_frame.value.encode("utf-8")
+    for joints, pose in zip(
+        dataset.joint_positions, dataset.observed_poses, strict=True
+    ):
+        digest = hashlib.sha256()
+        digest.update(frame)
+        digest.update(np.asarray(joints, dtype="<f8").tobytes())
+        digest.update(np.asarray(pose, dtype="<f8").tobytes())
+        hashes.append(digest.hexdigest())
+    return np.asarray(hashes)
 
 
 def minimum_full_pose_samples(dof: int) -> int:

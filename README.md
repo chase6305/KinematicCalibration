@@ -85,6 +85,8 @@ kinematic-calib solve --backend numpy --dataset train.npz --urdf robot.urdf \
   --ee-name tool_link --model-mode robot-body --output outputs/fit.npz
 kinematic-calib validate-result --parameters outputs/fit.npz \
   --dataset validation.npz --output outputs/validation.json
+kincal view-fit --parameters outputs/fit.npz --dataset validation.npz \
+  --urdf robot.urdf
 
 # 统一入口也支持无 RTB 的几何拟合、工件复核及汇总
 kinematic-calib calibrate --backend numpy --calibration-type geometry \
@@ -95,6 +97,8 @@ kinematic-calib calibrate --backend numpy --calibration-type geometry \
 `--backend numpy` 支持指定 `--base-link`、已知相机外参及复合模型；结果用于预测和独立
 验证，不包含物理 joint origin，因此明确不允许通过该路线导出 URDF。
 统一入口会在结果中注明跳过导出的原因；零偏和 `both` 阶段仍使用可选 RTB 适配器。
+已有工件的可视化不会构造真值模型；相机坐标、固定外参和样本标签说明见
+[观测数据回放](docs/measured-playback.md)。
 
 完整迁移的 URDF 工作流使用可选 RTB 模型适配器：
 

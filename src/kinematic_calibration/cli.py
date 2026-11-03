@@ -29,13 +29,23 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--force", action="store_true")
     view = commands.add_parser("view", help="Replay an experiment in Viser")
     view.add_argument("experiment", type=Path)
-    view.add_argument("--host", default="127.0.0.1")
-    view.add_argument("--port", type=int, default=8080)
-    view.add_argument(
-        "--duration",
-        type=float,
-        help="Stop server after this many seconds (smoke checks)",
+    view_fit = commands.add_parser(
+        "view-fit", help="Replay recorded observations with fitted POE parameters"
     )
+    view_fit.add_argument("--parameters", type=Path, required=True)
+    view_fit.add_argument("--dataset", type=Path, required=True)
+    view_fit.add_argument("--urdf", type=Path, required=True)
+    view_fit.add_argument("--result", type=Path)
+    view_fit.add_argument("--base-t-camera", type=Path)
+    view_fit.add_argument("--ee-t-target", type=Path)
+    for viewer in (view, view_fit):
+        viewer.add_argument("--host", default="127.0.0.1")
+        viewer.add_argument("--port", type=int, default=8080)
+        viewer.add_argument(
+            "--duration",
+            type=float,
+            help="Stop server after this many seconds (smoke checks)",
+        )
     inspect = commands.add_parser(
         "inspect", help="Print an experiment's validation metrics"
     )
@@ -193,14 +203,28 @@ def main(argv=None) -> int:
             )
             print(json.dumps(report, indent=2, allow_nan=False))
             return 0 if report["full_rank"] else 1
-        elif args.command == "view":
-            from .backends.viser import create_viewer
-
+        elif args.command in {"view", "view-fit"}:
             if args.duration is not None and (
                 args.duration <= 0 or not math.isfinite(args.duration)
             ):
                 raise ValueError("duration must be finite and positive")
-            server = create_viewer(args.experiment, host=args.host, port=args.port)
+            if args.command == "view":
+                from .backends.viser import create_viewer
+
+                server = create_viewer(args.experiment, host=args.host, port=args.port)
+            else:
+                from .backends.viser import create_fitted_viewer
+
+                server = create_fitted_viewer(
+                    args.parameters,
+                    args.dataset,
+                    args.urdf,
+                    result=args.result,
+                    base_t_camera=args.base_t_camera,
+                    ee_t_target=args.ee_t_target,
+                    host=args.host,
+                    port=args.port,
+                )
             try:
                 deadline = (
                     None if args.duration is None else time.monotonic() + args.duration
