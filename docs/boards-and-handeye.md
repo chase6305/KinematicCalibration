@@ -87,6 +87,10 @@ opencv-handeye-calib export --samples handeye_observations.npz --result handeye.
 
 同样保留 `inspect`、`compare`、`influence`、`bootstrap` 诊断命令。归档契约、候选姿态索引、内容指纹和结果验证随实现移植；旧项目产生的结果文件由于实现指纹不同，需要从原观察 NPZ 重新求解。CLI 报告中的 `accepted` 仅表示配置的闭环质量阈值通过。
 
+所有写入命令均检查来源路径和已有输出，`--force` 不能覆盖输入样本。空或截断NPZ返回
+简洁错误。`export` 先准备两个NPY，再发布到各自目录；普通失败或Python中断恢复原配对，
+支持不同目录和文件系统，不保证进程崩溃时两个文件一起完成。
+
 ## 来源
 
 运动学工作流相关的板资源、OpenCV 手眼 CLI、求解器和 RGBD 噪声实现移植自本地 `auto_calibrate_sim` 工作区快照；Git HEAD 为 `9488a2dbffc3e7635f3b0109a8839bd261a57cb0`，包含未提交修改，原文件哈希见 [来源记录](porting.md)。手眼工具包通过 [`third_party/HandEyeCalibrationToolkit`](../third_party/HandEyeCalibrationToolkit) 子模块独立维护。原始资源来源说明见包内 `assets/boards/ORIGIN.md`。
@@ -110,38 +114,9 @@ python -m pytest -q tests/integrations/test_handeye_adapter.py \
 
 现有旧板可以继续使用已有兼容检测器输出的有序中心点，再经 `pose_from_correspondences()` 得到板位姿。`legacy_artwork` 检查限制的是未经验证的原生检测器与环形编码组合，不要求为了本项目重新打印板。
 
-### 此工作站已有 native build 的只读验证记录
+### 本地原生验证范围
 
-本轮额外验证使用的是邻接 Toolkit 工作区中**已经编译好的 `build-session` 二进制**，通过临时 Python 包加载；未改动该工作区、Conda 环境或安装包。它验证适配器与已有 ABI/API 的实际互操作，**不是本仓库固定子模块 commit 的重新构建结果**。当前解释器 ABI 为 CPython 3.10；切换 Python 版本后必须使用匹配 ABI 的扩展。
-
-在本工作站、项目根目录可复现此验证（这些路径指向现存构建/Conan 缓存，不是通用安装路径）：
-
-```bash
-native_probe_dir="$(mktemp -d /tmp/kincal-native-probe.XXXXXX)"
-.venv/bin/python - "$native_probe_dir" <<'PY'
-import sys
-import sysconfig
-from pathlib import Path
-
-package = Path(sys.argv[1]) / "handeye_calibration"
-package.mkdir()
-(package / "__init__.py").write_text(
-    "from . import pybind\ncalibration = pybind.calibration\n"
-)
-name = "pybind" + sysconfig.get_config_var("EXT_SUFFIX")
-existing = Path(
-    "/home/ubuntu/workspace/chase/HandEyeCalibrationToolkit/"
-    "build-session/build/Release/cpp/pybind"
-) / name
-if not existing.is_file():
-    raise SystemExit(f"No existing extension for this Python ABI: {existing}")
-(package / name).symlink_to(existing)
-PY
-LD_LIBRARY_PATH=/home/ubuntu/.conan2/p/b/openc0ab507eba7a96/p/lib:/home/ubuntu/.conan2/p/b/ceresbaee1d1a220a4/p/lib:/home/ubuntu/.conan2/p/b/spdlo4d1e092e6b517/p/lib \
-PYTHONPATH="$native_probe_dir:$PWD/src" \
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q \
-  tests/integrations/test_handeye_adapter.py tests/integrations/test_detection.py \
-  -k optional_native
-```
-
-记录结果为两项通过：完整位姿手眼外参恢复，以及 RGB 圆板原生检测、真实像素 RMS 与已知深度恢复。正式接入应构建安装固定子模块版本，并使用其运行库环境运行同一组测试。
+早期只读检查使用邻接工作区的既有二进制，只证明当时ABI/API可互操作。后续已从本仓库
+固定子模块 `2de5138a` 单独构建验证；最新检测、图像实验和采集相关检查为91项通过。
+各阶段范围见 [优化记录](worklog.md)，构建与运行库激活方法见 [原生构建](native-build.md)。
+切换Python版本时须使用匹配ABI的扩展；正常导入不自动下载或构建子模块。

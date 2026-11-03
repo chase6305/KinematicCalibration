@@ -5,8 +5,25 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
+
+
+def refuse_input_output_aliases(
+    inputs: Sequence[Path | None], outputs: Sequence[Path], command: str
+) -> None:
+    """Reject output paths that resolve or link to an input file."""
+    for source in inputs:
+        if source is None:
+            continue
+        for output in outputs:
+            if source.resolve() == output.resolve() or (
+                source.exists() and output.exists() and source.samefile(output)
+            ):
+                raise ValueError(
+                    f"{command} output conflicts with input: {output} aliases {source}"
+                )
 
 
 def _temporary_path(destination: Path) -> Path:
@@ -48,15 +65,14 @@ def atomic_write_pair(
     second_path: Path | str,
     second_content: bytes,
 ) -> None:
-    """Stage sibling files and restore the previous pair if publication fails.
+    """Stage two files and restore the previous pair if publication fails.
 
     Rollback handles ordinary I/O failures and Python interruptions. The two
-    replacements are not atomic across process crashes; bound hashes let readers
-    reject an interrupted pair. Failed rollback retains its backup directory.
+    replacements are not atomic across process crashes. Each parent has its own
+    staging directory so replacements stay on the destination filesystem. Failed
+    rollback retains the staging directories and their recoverable backups.
     """
     destinations = (Path(first_path), Path(second_path))
-    if destinations[0].parent.resolve() != destinations[1].parent.resolve():
-        raise ValueError("paired outputs must share a parent directory")
     if destinations[0].resolve() == destinations[1].resolve():
         raise ValueError("paired outputs must use different paths")
     for destination in destinations:
@@ -64,12 +80,22 @@ def atomic_write_pair(
             destination.exists() and not destination.is_file()
         ):
             raise ValueError(f"paired output is not a regular file: {destination}")
-    parent = destinations[0].parent
-    parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=".calibration-pair-", dir=parent))
-    retain_stage = False
+    stages = {}
+    output_stages = []
+    retain_stages = False
     try:
-        for index, content in enumerate((first_content, second_content)):
+        for destination in destinations:
+            parent = destination.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            resolved_parent = parent.resolve()
+            if resolved_parent not in stages:
+                stages[resolved_parent] = Path(
+                    tempfile.mkdtemp(prefix=".calibration-pair-", dir=parent)
+                )
+            output_stages.append(stages[resolved_parent])
+        for index, (content, stage) in enumerate(
+            zip((first_content, second_content), output_stages)
+        ):
             staged_path = stage / f"{index}.new"
             with staged_path.open("wb") as stream:
                 staged_path.chmod(0o600)
@@ -83,27 +109,29 @@ def atomic_write_pair(
                     # Record intent before replacement: an interruption can
                     # arrive after the syscall has already moved the file.
                     backup_attempts.append(index)
-                    os.replace(destination, stage / f"{index}.previous")
+                    os.replace(destination, output_stages[index] / f"{index}.previous")
             for index, destination in enumerate(destinations):
                 install_attempts.append(index)
-                os.replace(stage / f"{index}.new", destination)
+                os.replace(output_stages[index] / f"{index}.new", destination)
         except BaseException:
             try:
                 for index in reversed(install_attempts):
                     destinations[index].unlink(missing_ok=True)
                 for index in backup_attempts:
-                    previous = stage / f"{index}.previous"
+                    previous = output_stages[index] / f"{index}.previous"
                     if previous.exists():
                         os.replace(previous, destinations[index])
             except BaseException as recovery_error:
-                retain_stage = True
+                retain_stages = True
+                retained = ", ".join(str(stage) for stage in stages.values())
                 raise OSError(
-                    f"calibration output rollback failed; previous files retained at {stage}"
+                    f"calibration output rollback failed; previous files retained at {retained}"
                 ) from recovery_error
             raise
     finally:
-        if not retain_stage:
-            shutil.rmtree(stage)
+        if not retain_stages:
+            for stage in stages.values():
+                shutil.rmtree(stage)
 
 
 def atomic_savez_compressed(path: Path | str, **arrays) -> None:

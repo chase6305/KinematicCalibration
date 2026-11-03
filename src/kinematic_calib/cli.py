@@ -30,6 +30,7 @@ from .io_utils import (
     atomic_write_pair,
     atomic_write_text,
 )
+from .io_utils import refuse_input_output_aliases as _refuse_input_output_aliases
 from .quality import evaluate_solution_quality as _evaluate_solution_quality
 from .robot_model import (
     estimate_joint_zero_offsets,
@@ -227,21 +228,6 @@ def _refuse_existing_outputs(paths: Sequence[Path], force: bool, command: str) -
         raise ValueError(
             f"{command} output already exists; use --force: " + ", ".join(existing)
         )
-
-
-def _refuse_input_output_aliases(
-    inputs: Sequence[Path | None], outputs: Sequence[Path], command: str
-) -> None:
-    for source in inputs:
-        if source is None:
-            continue
-        for output in outputs:
-            if source.resolve() == output.resolve() or (
-                source.exists() and output.exists() and source.samefile(output)
-            ):
-                raise ValueError(
-                    f"{command} output conflicts with input: {output} aliases {source}"
-                )
 
 
 def _create_template(args: argparse.Namespace) -> int:

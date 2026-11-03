@@ -2,16 +2,22 @@
 
 import argparse
 import hashlib
+import io
 import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
+from zipfile import BadZipFile
 
 import cv2 as cv
 import numpy as np
 
-from kinematic_calib.io_utils import atomic_save_npy, atomic_write_json
+from kinematic_calib.io_utils import (
+    atomic_write_json,
+    atomic_write_pair,
+    refuse_input_output_aliases,
+)
 
 from .handeye.opencv import (
     MIN_ROTATION_DIRECTION_RATIO,
@@ -27,6 +33,21 @@ from .handeye.opencv import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _preflight_outputs(
+    inputs: Sequence[Path], outputs: Sequence[Path], force: bool, command: str
+) -> None:
+    refuse_input_output_aliases(inputs, outputs, command)
+    for index, output in enumerate(outputs):
+        refuse_input_output_aliases(outputs[:index], (output,), command)
+        if output.is_symlink() or (output.exists() and not output.is_file()):
+            raise ValueError(f"{command} output is not a regular file: {output}")
+    existing = [str(output) for output in outputs if output.exists()]
+    if existing and not force:
+        raise ValueError(
+            f"{command} output exists; use --force to replace it: " + ", ".join(existing)
+        )
 
 
 def _sha256(path: Path) -> str:
@@ -147,10 +168,7 @@ def _solve(args: argparse.Namespace) -> int:
         raise ValueError("--samples must use the .npz extension")
     if args.output.suffix.lower() != ".json":
         raise ValueError("--output must use the .json extension")
-    if args.samples.resolve() == args.output.resolve():
-        raise ValueError("sample and result paths must be different")
-    if args.output.exists() and not args.force:
-        raise ValueError("result already exists; use --force to replace it")
+    _preflight_outputs((args.samples,), (args.output,), args.force, "solve")
     thresholds = (args.max_position_error, args.max_orientation_error)
     if any(not np.isfinite(value) or value <= 0.0 for value in thresholds):
         raise ValueError("error thresholds must be positive finite values")
@@ -426,18 +444,21 @@ def _export(args: argparse.Namespace) -> int:
     resolved = [path.resolve() for path in (args.samples, args.result, *outputs)]
     if len(set(resolved)) != len(resolved):
         raise ValueError("sample, result, and transform output paths must be different")
-    existing = [str(path) for path in outputs if path.exists()]
-    if existing and not args.force:
-        raise ValueError(
-            "transform output exists; use --force to replace it: " + ", ".join(existing)
-        )
+    _preflight_outputs((args.samples, args.result), outputs, args.force, "export")
     report, summary, accepted = _load_verified_result(args.samples, args.result)
     if not accepted:
         raise ValueError("refusing to export a rejected hand-eye calibration")
     base_T_camera = np.asarray(report["Base_T_Camera"], dtype=np.float64)
     ee_T_target = np.asarray(report["EE_T_Board"], dtype=np.float64)
-    atomic_save_npy(args.base_t_camera, base_T_camera)
-    atomic_save_npy(args.ee_t_target, ee_T_target)
+    base_buffer, target_buffer = io.BytesIO(), io.BytesIO()
+    np.save(base_buffer, base_T_camera, allow_pickle=False)
+    np.save(target_buffer, ee_T_target, allow_pickle=False)
+    atomic_write_pair(
+        args.base_t_camera,
+        base_buffer.getvalue(),
+        args.ee_t_target,
+        target_buffer.getvalue(),
+    )
     LOGGER.info("Wrote Base_T_Camera: %s", args.base_t_camera)
     LOGGER.info("Wrote EE_T_Target (calibration board): %s", args.ee_t_target)
     print(
@@ -469,8 +490,7 @@ def _compare(args: argparse.Namespace) -> int:
         raise ValueError("--samples must use the .npz extension")
     if args.output.suffix.lower() != ".json":
         raise ValueError("--output must use the .json extension")
-    if args.output.exists() and not args.force:
-        raise ValueError("comparison output exists; use --force to replace it")
+    _preflight_outputs((args.samples,), (args.output,), args.force, "compare")
     thresholds = (
         args.max_position_error,
         args.max_orientation_error,
@@ -628,8 +648,7 @@ def _influence(args: argparse.Namespace) -> int:
         raise ValueError("--samples must use the .npz extension")
     if args.output.suffix.lower() != ".json":
         raise ValueError("--output must use the .json extension")
-    if args.output.exists() and not args.force:
-        raise ValueError("influence output exists; use --force to replace it")
+    _preflight_outputs((args.samples,), (args.output,), args.force, "influence")
     if any(
         not np.isfinite(value) or value <= 0.0
         for value in (args.position_scale, args.orientation_scale)
@@ -743,8 +762,7 @@ def _bootstrap(args: argparse.Namespace) -> int:
         raise ValueError("--samples must use the .npz extension")
     if args.output.suffix.lower() != ".json":
         raise ValueError("--output must use the .json extension")
-    if args.output.exists() and not args.force:
-        raise ValueError("bootstrap output exists; use --force to replace it")
+    _preflight_outputs((args.samples,), (args.output,), args.force, "bootstrap")
     if args.replicates <= 0:
         raise ValueError("--replicates must be positive")
     if not np.isfinite(args.min_success_rate) or not 0.0 < args.min_success_rate <= 1.0:
@@ -865,6 +883,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "bootstrap":
             return _bootstrap(args)
         return _solve(args)
+    except (EOFError, BadZipFile) as exc:
+        LOGGER.error("invalid hand-eye observation NPZ %s: %s", args.samples, exc)
+        return 2
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         LOGGER.error("%s", exc)
         return 2
