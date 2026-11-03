@@ -13,7 +13,8 @@ from kinematic_calib.cli import main
 def _dataset(names=("shoulder", "elbow"), count=12):
     q = np.random.default_rng(17).uniform(-1, 1, (count, 2))
     poses = np.repeat(np.eye(4)[None], count, axis=0)
-    poses[:, :3, :3] = Rotation.from_euler("z", np.linspace(0, 1, count)).as_matrix()
+    angles = np.linspace(0, 1, count)[:, None]
+    poses[:, :3, :3] = Rotation.from_euler("z", angles).as_matrix()
     poses[:, 0, 3] = np.linspace(0, 0.3, count)
     return KinematicDataset(
         q, poses, ObservationFrame.CAMERA_T_TARGET, np.arange(100, 100 + count), names
