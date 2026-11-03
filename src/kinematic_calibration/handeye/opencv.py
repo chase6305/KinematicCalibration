@@ -6,6 +6,7 @@ This module is loaded only when the OpenCV backend is requested.
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from zipfile import BadZipFile
 
 import cv2 as cv
 import numpy as np
@@ -77,7 +78,13 @@ def handeye_observations_sha256(
 
 def load_opencv_observations(path: Path | str) -> OpenCVObservationArchive:
     """Load and validate a schema-tagged eye-to-hand observation NPZ."""
-    with np.load(path, allow_pickle=False) as archive:
+    try:
+        archive = np.load(path, allow_pickle=False)
+    except (EOFError, ValueError, BadZipFile) as exc:
+        raise ValueError(f"invalid hand-eye observation NPZ {path}: {exc}") from exc
+    if not isinstance(archive, np.lib.npyio.NpzFile):
+        raise ValueError(f"hand-eye observation input must be an NPZ archive: {path}")
+    with archive:
         required = {
             "schema_version",
             "archive_type",
@@ -201,17 +208,20 @@ def evaluate_eye_to_hand_solution(
             raise ValueError(f"{name} is not a valid rigid transform")
         solutions.append(transform)
     base_T_camera_value, ee_T_board_value = solutions
-    position_errors = []
-    orientation_errors = []
-    for base_T_ee_i, camera_T_board_i in zip(ee_poses, board_poses, strict=True):
-        lhs = base_T_ee_i @ ee_T_board_value
-        rhs = base_T_camera_value @ camera_T_board_i
-        delta = np.linalg.inv(lhs) @ rhs
-        position_errors.append(float(np.linalg.norm(delta[:3, 3])))
-        cosine = np.clip((np.trace(delta[:3, :3]) - 1.0) / 2.0, -1.0, 1.0)
-        orientation_errors.append(float(np.arccos(cosine)))
-    position_errors_array = np.asarray(position_errors)
-    orientation_errors_array = np.asarray(orientation_errors)
+    # The robot and camera sides both express Base_T_Board.
+    lhs = ee_poses @ ee_T_board_value
+    rhs = base_T_camera_value @ board_poses
+    delta = np.linalg.inv(lhs) @ rhs
+    # Preserve the per-vector norm reduction order and worst-sample tie behavior.
+    position_errors_array = np.asarray(
+        [float(np.linalg.norm(item[:3, 3])) for item in delta]
+    )
+    cosine = np.clip(
+        (np.trace(delta[:, :3, :3], axis1=1, axis2=2) - 1.0) / 2.0,
+        -1.0,
+        1.0,
+    )
+    orientation_errors_array = np.arccos(cosine)
     return {
         "position_error_mean_m": float(np.mean(position_errors_array)),
         "position_error_max_m": float(np.max(position_errors_array)),

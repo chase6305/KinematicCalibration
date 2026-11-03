@@ -263,12 +263,16 @@ def test_export_supports_destinations_in_distinct_directories(
     assert all(set(path.parent.iterdir()) == {path} for path in outputs)
 
 
-@pytest.mark.parametrize("kind", ["empty", "truncated"])
+@pytest.mark.parametrize("kind", ["empty", "truncated", "npy"])
 def test_corrupt_samples_return_error_and_preserve_output(
     observations, caplog, capsys, kind
 ):
     samples, _, _ = observations
-    samples.write_bytes(b"" if kind == "empty" else samples.read_bytes()[:80])
+    if kind == "npy":
+        with samples.open("wb") as stream:
+            np.save(stream, np.eye(4), allow_pickle=False)
+    else:
+        samples.write_bytes(b"" if kind == "empty" else samples.read_bytes()[:80])
     output = samples.parent / "result.json"
     output.write_bytes(b"previous result")
 

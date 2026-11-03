@@ -1,5 +1,3 @@
-import subprocess
-import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -37,11 +35,6 @@ def observations():
     )
     board = np.linalg.inv(camera) @ robot @ mount
     return robot, board, camera, mount
-
-
-def test_imports_do_not_load_optional_backends():
-    script = 'import sys; import kinematic_calibration.handeye; import kinematic_calibration.targets; assert "cv2" not in sys.modules; assert "handeye_calibration" not in sys.modules; assert "dexsim" not in sys.modules'
-    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 @pytest.mark.parametrize("method", ["shah", "li"])

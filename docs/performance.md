@@ -221,3 +221,36 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python \
 
 给定的全部姿态均需访问时，`save_pose_plan(input_joints=...)` 直接计算一次回归诊断，
 避免再执行逐轮贪心筛选；显式选择子集继续使用原D-optimal语义。
+
+## 手眼闭环误差
+
+OpenCV手眼诊断保留一般矩阵逆、逐行位置范数和全部输入/退化检查，把矩阵乘法、逆、
+trace、clip及反余弦沿样本批处理。输入是真值变换独立指定的SE(3)姿态，加相机噪声，
+没有机器人模型或名义FK测量。原实现与实际生产代码的完整报告对照，除代码来源信息外
+全部相同，包括样本ID、影响排名、并列最差值和原始输入哈希。
+
+同机、Python3.10 / NumPy1.26.4 / OpenCV4.11，BLAS/OMP/OpenCV线程均为1。
+1000姿态、bootstrap20次的完整CLI调用计时包含读档、校验、求解和报告写入，排除导入、
+输入构造、预热与结果复核。以下为三个配对运行的CPU中位数；影响分析单独注明单次对照：
+
+| 工作流 | 原CPU | 批处理后CPU | 减少 |
+| --- | --- | --- | --- |
+| SHAH/LI比较 | 81.39 ms | 61.08 ms | 25.0% |
+| SHAH bootstrap ×20 | 0.6680 s | 0.4558 s | 31.8% |
+| LI bootstrap ×20 | 0.8748 s | 0.6501 s | 25.7% |
+| SHAH影响分析，单次配对 | 31.973 s | 18.646 s | 41.7% |
+
+影响分析单次wall time为 **32.071 → 18.737 s**，没有把单次结果声称为中位数；
+其逐个留一求解的工作量不变。实际源码指纹、原始记录及profile在本次会话
+`/tmp/kincal-handeye-performance-implemented/`。复现当前版本：
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python \
+  benchmarks/profile_handeye.py --samples 100 1000 --repeats 3 \
+  --output /tmp/handeye-profile.json
+
+# 影响分析开销较大，显式选择；脚本每组还会执行一次完整预热
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python \
+  benchmarks/profile_handeye.py --samples 1000 --workflows influence \
+  --methods shah --repeats 1 --output /tmp/handeye-influence-profile.json
+```
