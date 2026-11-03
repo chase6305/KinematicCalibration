@@ -29,6 +29,8 @@ class PosePlan:
 
     ``visit_order`` maps each saved row to its selection-order row. Recover
     selection order with ``planned_joint_positions[np.argsort(visit_order)]``.
+    Optional ``source_sample_indices`` maps every source row to its original
+    sample ID; index it with ``candidate_indices`` to recover visit sample IDs.
     Loading a plan establishes neither independent measurements nor motion safety.
     """
 
@@ -41,6 +43,7 @@ class PosePlan:
     joint_limits: np.ndarray
     singular_values: np.ndarray
     metadata: dict
+    source_sample_indices: np.ndarray | None = None
 
 
 def _positive_scalar(value, name: str) -> float:
@@ -51,6 +54,16 @@ def _positive_scalar(value, name: str) -> float:
     if not np.isfinite(result) or result <= 0:
         raise ValueError(f"{name} must be a finite positive real number")
     return result
+
+
+def _sha256_metadata(value, name):
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"pose plan {name} must be a SHA-256 hex digest")
+    return value
 
 
 def load_pose_plan(
@@ -68,7 +81,7 @@ def load_pose_plan(
     """
     import json
 
-    from kinematic_calib.dataset import validated_joint_names
+    from kinematic_calib.dataset import validated_joint_names, validated_sample_indices
 
     from .routing import _configurations
 
@@ -90,6 +103,8 @@ def load_pose_plan(
         if not set(keys).issubset(archive.files):
             raise ValueError("pose plan is missing required arrays")
         arrays = {key: archive[key] for key in keys}
+        if "source_sample_indices" in archive.files:
+            arrays["source_sample_indices"] = archive["source_sample_indices"]
     raw_metadata = arrays.pop("metadata_json")
     if raw_metadata.shape != () or raw_metadata.dtype.kind != "U":
         raise ValueError("pose plan metadata_json must be a scalar string")
@@ -149,6 +164,73 @@ def load_pose_plan(
     ):
         raise ValueError("pose plan candidate_indices do not match visit_order")
 
+    source_sample_indices = None
+    if "source_sample_indices" in arrays:
+        source_sample_indices = validated_sample_indices(
+            arrays["source_sample_indices"],
+            candidate_count,
+            label="source_sample_indices",
+        )
+    if "selection_method" in metadata:
+        if metadata["selection_method"] not in ("all-input", "d-optimal"):
+            raise ValueError("unsupported pose plan selection_method")
+        if metadata["selection_method"] == "all-input" and (
+            candidate_count != count
+            or not np.array_equal(
+                arrays["selected_candidate_indices"], np.arange(count)
+            )
+        ):
+            raise ValueError(
+                "all-input pose plan must retain every source row in order"
+            )
+    if (
+        "generation_seed_used" in metadata
+        and type(metadata["generation_seed_used"]) is not bool
+    ):
+        raise ValueError("pose plan generation_seed_used must be a boolean")
+    provenance_keys = (
+        "input_joints_sha256",
+        "input_joints_format",
+        "input_joint_identity_verified",
+        "input_joint_names",
+    )
+    if (
+        any(key in metadata for key in provenance_keys)
+        or source_sample_indices is not None
+        or metadata.get("generation_seed_used") is False
+        or metadata.get("selection_method") == "all-input"
+    ):
+        if not all(key in metadata for key in provenance_keys):
+            raise ValueError("pose plan is missing input joint provenance")
+        _sha256_metadata(metadata["input_joints_sha256"], "input_joints_sha256")
+        if metadata["input_joints_format"] not in ("npy", "npz"):
+            raise ValueError("pose plan input_joints_format must be npy or npz")
+        verified = metadata["input_joint_identity_verified"]
+        if type(verified) is not bool:
+            raise ValueError(
+                "pose plan input_joint_identity_verified must be a boolean"
+            )
+        input_names = metadata["input_joint_names"]
+        if input_names is not None:
+            if validated_joint_names(input_names, dof) != names:
+                raise ValueError(
+                    "pose plan input_joint_names do not match model columns"
+                )
+        if verified != (input_names is not None):
+            raise ValueError(
+                "pose plan input joint identity verification is inconsistent"
+            )
+        if metadata["input_joints_format"] == "npy" and (
+            input_names is not None or source_sample_indices is not None
+        ):
+            raise ValueError("NPY input cannot provide joint names or sample indices")
+        if metadata.get("generation_seed_used") is not False:
+            raise ValueError(
+                "supplied input pose plan generation_seed_used must be false"
+            )
+        if metadata.get("selection_method") not in ("all-input", "d-optimal"):
+            raise ValueError("supplied input pose plan requires selection_method")
+
     for key in (
         "measurements_acquired",
         "collision_checked",
@@ -160,13 +242,9 @@ def load_pose_plan(
     for key in ("base_link", "end_link"):
         if not isinstance(metadata.get(key), str) or not metadata[key].strip():
             raise ValueError(f"pose plan {key} must be a nonempty string")
-    source_hash = metadata.get("source_urdf_sha256")
-    if (
-        not isinstance(source_hash, str)
-        or len(source_hash) != 64
-        or any(character not in "0123456789abcdef" for character in source_hash)
-    ):
-        raise ValueError("pose plan source_urdf_sha256 must be a SHA-256 hex digest")
+    source_hash = _sha256_metadata(
+        metadata.get("source_urdf_sha256"), "source_urdf_sha256"
+    )
     if source_urdf_sha256 is not None and source_urdf_sha256 != source_hash:
         raise ValueError("pose plan source URDF SHA-256 does not match model")
     if backend is not None:
@@ -292,49 +370,16 @@ def load_pose_plan(
         joint_limits=limits,
         singular_values=singular_values,
         metadata=metadata,
+        source_sample_indices=source_sample_indices,
     )
 
 
-def select_informative_poses(
-    backend: KinematicsBackend,
-    candidates: np.ndarray,
-    *,
-    count: int,
-    characteristic_length_m: float = 1.0,
-    regularization: float = 1e-6,
-) -> PoseSelection:
-    """Greedy D-optimal selection, scaled to dimensionless pose residuals.
+def _candidate_configurations(backend, candidates):
+    from .routing import _configurations
 
-    Translation rows are divided by ``characteristic_length_m``; rotation rows
-    remain radians. The selection favors new observable directions, with
-    Tikhonov regularization only for the greedy score. The reported rank and
-    condition use the *unregularized* stacked selected regressor. Returned rows
-    follow selection order; visit-order planning can reorder them separately.
-    """
-    from spatialmath import SE3
-
-    from robotkinecal import SerialRobotKineCal
-
-    raw_candidates = np.asarray(candidates)
-    if (
-        raw_candidates.dtype.kind not in "iuf"
-        or raw_candidates.ndim != 2
-        or raw_candidates.shape[1] != backend.dof
-        or not len(raw_candidates)
-        or not np.isfinite(raw_candidates).all()
-    ):
-        raise ValueError("candidates must be finite real [N,DOF] joint configurations")
-    configurations = raw_candidates.astype(float, copy=False)
-    if (
-        not isinstance(count, (int, np.integer))
-        or isinstance(count, (bool, np.bool_))
-        or not 1 <= count <= len(configurations)
-    ):
-        raise ValueError("count must be an integer between 1 and the candidate count")
-    characteristic_length_m = _positive_scalar(
-        characteristic_length_m, "characteristic_length_m"
-    )
-    regularization = _positive_scalar(regularization, "regularization")
+    configurations = _configurations(candidates, name="candidates")
+    if configurations.shape[1] != backend.dof:
+        raise ValueError("candidates must have shape [N,DOF] matching the backend")
     limits = np.asarray(backend.joint_limits)
     if (
         limits.dtype.kind not in "iuf"
@@ -345,6 +390,24 @@ def select_informative_poses(
         raise ValueError("backend must provide ordered finite [DOF,2] joint limits")
     if np.any(configurations < limits[:, 0]) or np.any(configurations > limits[:, 1]):
         raise ValueError("candidate configurations must respect backend joint limits")
+    return configurations
+
+
+def _selection_count(count, candidate_count):
+    if (
+        not isinstance(count, (int, np.integer))
+        or isinstance(count, (bool, np.bool_))
+        or not 1 <= count <= candidate_count
+    ):
+        raise ValueError("count must be an integer between 1 and the candidate count")
+    return int(count)
+
+
+def _regressor_blocks(backend, configurations, characteristic_length_m):
+    from spatialmath import SE3
+
+    from robotkinecal import SerialRobotKineCal
+
     poe_parameters = getattr(backend, "poe_parameters", None)
     if not callable(poe_parameters):
         raise ValueError("pose selection requires a backend providing poe_parameters()")
@@ -359,40 +422,12 @@ def select_informative_poses(
         regressor_blocks[:, :3] /= characteristic_length_m
     if not np.isfinite(regressor_blocks).all():
         raise ValueError("characteristic length produces non-finite regressor rows")
+    return regressor_blocks
 
-    parameter_count = regressor_blocks.shape[2]
-    parameter_identity = np.eye(parameter_count)
-    information = regularization * parameter_identity
-    with np.errstate(over="ignore"):
-        information_inverse = parameter_identity / regularization
-    if not np.isfinite(information_inverse).all():
-        raise ValueError("regularization is too small for finite information scores")
-    remaining = np.ones(len(configurations), dtype=bool)
-    selected_indices = []
-    for _ in range(count):
-        candidate_indices = np.flatnonzero(remaining)
-        available_blocks = regressor_blocks[candidate_indices]
-        score_matrices = (
-            np.eye(6)
-            + available_blocks
-            @ information_inverse
-            @ available_blocks.transpose(0, 2, 1)
-        )
-        signs, scores = np.linalg.slogdet(score_matrices)
-        if np.any(signs <= 0) or not np.isfinite(scores).all():
-            raise ValueError("pose information score became numerically singular")
-        selected_index = int(candidate_indices[np.argmax(scores)])
-        selected_indices.append(selected_index)
-        remaining[selected_index] = False
-        selected_block = regressor_blocks[selected_index]
-        information += selected_block.T @ selected_block
-        # Re-factor the small information matrix each round instead of updating
-        # its inverse recursively, which can accumulate numerical drift.
-        information_inverse = np.linalg.solve(information, parameter_identity)
-        information_inverse = (information_inverse + information_inverse.T) / 2
 
-    selected_indices = np.asarray(selected_indices, dtype=np.int64)
-    selected_matrix = regressor_blocks[selected_indices].reshape(-1, parameter_count)
+def _pose_selection(configurations, selected_indices, blocks, characteristic_length_m):
+    parameter_count = blocks.shape[2]
+    selected_matrix = blocks[selected_indices].reshape(-1, parameter_count)
     singular_values = np.linalg.svd(selected_matrix, compute_uv=False)
     rank_tolerance = (
         singular_values[0]
@@ -416,15 +451,76 @@ def select_informative_poses(
     )
 
 
+def select_informative_poses(
+    backend: KinematicsBackend,
+    candidates: np.ndarray,
+    *,
+    count: int,
+    characteristic_length_m: float = 1.0,
+    regularization: float = 1e-6,
+) -> PoseSelection:
+    """Greedy D-optimal selection, scaled to dimensionless pose residuals.
+
+    Translation rows are divided by ``characteristic_length_m``; rotation rows
+    remain radians. The selection favors new observable directions, with
+    Tikhonov regularization only for the greedy score. The reported rank and
+    condition use the *unregularized* stacked selected regressor. Returned rows
+    follow selection order; visit-order planning can reorder them separately.
+    """
+    configurations = _candidate_configurations(backend, candidates)
+    count = _selection_count(count, len(configurations))
+    characteristic_length_m = _positive_scalar(
+        characteristic_length_m, "characteristic_length_m"
+    )
+    regularization = _positive_scalar(regularization, "regularization")
+    regressor_blocks = _regressor_blocks(
+        backend, configurations, characteristic_length_m
+    )
+
+    parameter_count = regressor_blocks.shape[2]
+    parameter_identity = np.eye(parameter_count)
+    information = regularization * parameter_identity
+    with np.errstate(over="ignore"):
+        information_inverse = parameter_identity / regularization
+    if not np.isfinite(information_inverse).all():
+        raise ValueError("regularization is too small for finite information scores")
+    remaining = np.ones(len(configurations), dtype=bool)
+    selected_indices = []
+    for _ in range(count):
+        candidate_indices = np.flatnonzero(remaining)
+        available_blocks = regressor_blocks[candidate_indices]
+        score_matrices = np.eye(6) + (
+            available_blocks @ information_inverse @ available_blocks.transpose(0, 2, 1)
+        )
+        signs, scores = np.linalg.slogdet(score_matrices)
+        if np.any(signs <= 0) or not np.isfinite(scores).all():
+            raise ValueError("pose information score became numerically singular")
+        selected_index = int(candidate_indices[np.argmax(scores)])
+        selected_indices.append(selected_index)
+        remaining[selected_index] = False
+        selected_block = regressor_blocks[selected_index]
+        information += selected_block.T @ selected_block
+        # Re-factor the small information matrix each round instead of updating
+        # its inverse recursively, which can accumulate numerical drift.
+        information_inverse = np.linalg.solve(information, parameter_identity)
+        information_inverse = (information_inverse + information_inverse.T) / 2
+
+    selected_indices = np.asarray(selected_indices, dtype=np.int64)
+    return _pose_selection(
+        configurations, selected_indices, regressor_blocks, characteristic_length_m
+    )
+
+
 def save_pose_plan(
     output: str | Path,
     *,
     urdf: str | Path | None = None,
     end_link: str = "ee_link",
     base_link: str | None = None,
-    count: int = 40,
+    count: int | None = None,
     candidates: int = 400,
     seed: int = 42,
+    input_joints: str | Path | None = None,
     characteristic_length_m: float = 1.0,
     start_configuration: np.ndarray | None = None,
     return_to_start: bool = False,
@@ -432,14 +528,24 @@ def save_pose_plan(
 ) -> dict:
     """Select calibration poses and save them in joint-space visit order.
 
+    Without ``input_joints``, generate ``candidates`` proposals and select 40
+    poses by default. Supplied NPY arrays or NPZ ``joint_positions`` contain
+    radians in selected URDF joint order; optional NPZ ``joint_names`` must
+    match that order exactly. Unnamed inputs retain unverified column identity.
+    NPZ ``sample_indices`` are preserved as source identities; observations
+    are never read. All supplied rows are visited unless ``count`` requests
+    a smaller D-optimal subset. Keeping all rows skips greedy selection.
+
     With no explicit start, the first selected pose starts the open route.
     ``return_to_start`` requires an explicit start configuration. Distances
     are Euclidean joint-angle distances in radians, without angle wrapping.
     This produces a visit order, with no collision checks or timed trajectory.
     """
     import hashlib
+    import io
     import json
 
+    from kinematic_calib.dataset import validated_joint_names, validated_sample_indices
     from kinematic_calib.io_utils import atomic_savez_compressed
 
     from .backends.numpy import NumpyBackend
@@ -455,6 +561,12 @@ def save_pose_plan(
     ):
         raise ValueError("candidates must be a positive integer")
     output = Path(output)
+    input_path = Path(input_joints) if input_joints is not None else None
+    if input_path is not None and (
+        output.resolve() == input_path.resolve()
+        or (output.exists() and input_path.exists() and output.samefile(input_path))
+    ):
+        raise ValueError("plan output cannot replace its input joint configurations")
     if output.is_symlink() or (output.exists() and not output.is_file()):
         raise ValueError("plan output must be a regular file")
     if output.exists() and not force:
@@ -482,18 +594,75 @@ def save_pose_plan(
         raise ValueError("return_to_start must be a boolean")
     if return_to_start and start_configuration is None:
         raise ValueError("return_to_start requires start_configuration")
-    lower, upper = np.maximum(limits[:, 0], -np.pi), np.minimum(limits[:, 1], np.pi)
-    empty = lower >= upper
-    lower[empty], upper[empty] = limits[empty, 0], limits[empty, 1]
-    proposals = np.random.default_rng(seed).uniform(
-        lower, upper, (candidates, backend.dof)
-    )
-    selected = select_informative_poses(
-        backend,
-        proposals,
-        count=count,
-        characteristic_length_m=characteristic_length_m,
-    )
+    source_sample_indices = None
+    provenance = {}
+    if input_path is None:
+        lower, upper = np.maximum(limits[:, 0], -np.pi), np.minimum(limits[:, 1], np.pi)
+        empty = lower >= upper
+        lower[empty], upper[empty] = limits[empty, 0], limits[empty, 1]
+        proposals = np.random.default_rng(seed).uniform(
+            lower, upper, (candidates, backend.dof)
+        )
+        count = 40 if count is None else count
+    else:
+        # Hash the exact bytes parsed, retaining portable provenance without
+        # requiring the original file when this plan is loaded elsewhere.
+        input_bytes = input_path.read_bytes()
+        archive = np.load(io.BytesIO(input_bytes), allow_pickle=False)
+        input_names = None
+        input_format = "npy"
+        if isinstance(archive, np.lib.npyio.NpzFile):
+            input_format = "npz"
+            with archive:
+                if "joint_positions" not in archive.files:
+                    raise ValueError("input joint NPZ is missing joint_positions")
+                proposals = _candidate_configurations(
+                    backend, archive["joint_positions"]
+                )
+                if "joint_names" in archive.files:
+                    input_names = validated_joint_names(
+                        archive["joint_names"], backend.dof
+                    )
+                    if input_names != tuple(backend.joint_names):
+                        raise ValueError(
+                            "input joint_names order does not match model; "
+                            "columns are never automatically reordered"
+                        )
+                if "sample_indices" in archive.files:
+                    source_sample_indices = validated_sample_indices(
+                        archive["sample_indices"], len(proposals)
+                    )
+        else:
+            proposals = _candidate_configurations(backend, archive)
+        candidates = len(proposals)
+        count = candidates if count is None else count
+        provenance = {
+            "input_joints_sha256": hashlib.sha256(input_bytes).hexdigest(),
+            "input_joints_format": input_format,
+            "input_joint_identity_verified": input_names is not None,
+            "input_joint_names": list(input_names) if input_names is not None else None,
+        }
+    count = _selection_count(count, candidates)
+    selection_method = "d-optimal"
+    if input_path is not None and count == candidates:
+        selection_method = "all-input"
+        characteristic_length_m = _positive_scalar(
+            characteristic_length_m, "characteristic_length_m"
+        )
+        blocks = _regressor_blocks(backend, proposals, characteristic_length_m)
+        selected = _pose_selection(
+            proposals,
+            np.arange(candidates, dtype=np.int64),
+            blocks,
+            characteristic_length_m,
+        )
+    else:
+        selected = select_informative_poses(
+            backend,
+            proposals,
+            count=count,
+            characteristic_length_m=characteristic_length_m,
+        )
     route = plan_visit_order(
         selected.joint_positions,
         start_configuration=start_configuration,
@@ -511,6 +680,8 @@ def save_pose_plan(
         "base_link": backend.base_link,
         "end_link": end_link,
         "seed": seed,
+        "generation_seed_used": input_path is None,
+        "selection_method": selection_method,
         "candidate_count": candidates,
         "selected_count": len(selected.joint_positions),
         "regressor_rank": selected.rank,
@@ -528,7 +699,13 @@ def save_pose_plan(
         "return_to_start": return_to_start,
         "total_distance_rad": route.total_distance_rad,
         "selection_order_distance_rad": route.initial_distance_rad,
+        **provenance,
     }
+    source_arrays = (
+        {"source_sample_indices": source_sample_indices}
+        if source_sample_indices is not None
+        else {}
+    )
     atomic_savez_compressed(
         output,
         planned_joint_positions=selected.joint_positions[route.indices],
@@ -540,5 +717,6 @@ def save_pose_plan(
         joint_limits=limits,
         singular_values=selected.singular_values,
         metadata_json=np.asarray(json.dumps(report, allow_nan=False)),
+        **source_arrays,
     )
     return report

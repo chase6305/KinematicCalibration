@@ -194,3 +194,30 @@ NumPy 1.22.4 / SciPy 1.10.1 的相关264项测试通过；不提高依赖下限�
 原始数据与脚本保存在本次会话 `/tmp/kincal-shared-prediction-{baseline,optimized}.json`
 和 `/tmp/kincal_shared_prediction_benchmark.py`。可对相同工件分别检出前后版本，以
 `load_experiment(path)` 的完整调用重复计时；这些数据不代表磁盘冷启动或实机精度。
+
+## 访问排序的临时数组
+
+2-opt每轮使用连续后缀切片，减少临时索引与布尔掩码。候选遍历、比较顺序、首个最大值
+的选择、容差和20轮上限不变。实际优化前后公开函数在1100组随机、重复、并列及不同
+起止方式的输入上，访问索引、各段距离和总距离均一致。
+
+同机单线程、五次暖调用，前后调用顺序交错，6/7DOF、40/200/1000点、三种起止方式
+共18组的process CPU中位耗时改善 **1.34–1.90×**。以下为6DOF、明确零点出发的开放路线：
+
+| 点数 | 原CPU / wall | 优化后CPU / wall |
+| --- | --- | --- |
+| 40 | 2.169 / 2.290 ms | 1.485 / 1.528 ms |
+| 200 | 23.543 / 25.501 ms | 15.854 / 17.802 ms |
+| 1000 | 371.990 / 463.658 ms | 265.590 / 305.430 ms |
+
+共享机器在该轮的load average约74–80，wall time包含明显的调度延迟，因此同时保留CPU
+时间。原始配对记录为本次会话 `/tmp/kincal-route-audit-final.json`；独立复现当前版本：
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python \
+  benchmarks/profile_planning.py --route-counts 40 200 1000 --repeats 5 \
+  --output /tmp/routing-profile.json
+```
+
+给定的全部姿态均需访问时，`save_pose_plan(input_joints=...)` 直接计算一次回归诊断，
+避免再执行逐轮贪心筛选；显式选择子集继续使用原D-optimal语义。

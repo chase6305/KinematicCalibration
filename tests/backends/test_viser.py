@@ -158,3 +158,35 @@ def test_image_preview_tracks_archived_sample_identity(
         assert preview.visible
     finally:
         server.stop()
+
+
+def test_supplied_plan_displays_original_source_sample_id(tmp_path, controls):
+    from kinematic_calibration.planning import load_pose_plan, save_pose_plan
+
+    source = tmp_path / "chosen.npz"
+    sample_ids = np.arange(12) * 7 + 91
+    np.savez_compressed(
+        source,
+        joint_positions=np.random.default_rng(42).uniform(-1, 1, (12, 6)),
+        sample_indices=sample_ids,
+        joint_names=np.asarray([f"Joint{i}" for i in range(1, 7)]),
+    )
+    plan_path = tmp_path / "plan.npz"
+    save_pose_plan(plan_path, input_joints=source)
+    plan = load_pose_plan(plan_path)
+    experiment = tmp_path / "experiment"
+    run_experiment(experiment, plan=plan_path, validation_samples=5)
+    server = create_viewer(experiment, split="training", port=0)
+    try:
+        slider = controls["sliders"]["Training pose"]
+        for row in (0, 11):
+            slider.value = row
+            candidate = int(plan.candidate_indices[row])
+            assert (
+                f"Training row: {row} · Candidate: {candidate} · Source sample: {sample_ids[candidate]}"
+                in controls["markdown"][-1].content
+            )
+        controls["checkboxes"]["Explore joint angles"].value = True
+        assert "Source sample:" not in controls["markdown"][-1].content
+    finally:
+        server.stop()

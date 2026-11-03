@@ -80,8 +80,18 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--urdf", type=Path)
     plan.add_argument("--end-link", default="ee_link")
     plan.add_argument("--base-link")
-    plan.add_argument("--count", type=int, default=40)
-    plan.add_argument("--candidates", type=int, default=400)
+    plan.add_argument(
+        "--count",
+        type=int,
+        help="Poses to select (default: 40 generated poses, or all supplied rows)",
+    )
+    candidate_source = plan.add_mutually_exclusive_group()
+    candidate_source.add_argument("--candidates", type=int, default=400)
+    candidate_source.add_argument(
+        "--input-joints",
+        type=Path,
+        help="Visit supplied NPY/NPZ joint configurations in URDF column order",
+    )
     plan.add_argument("--seed", type=int, default=42)
     plan.add_argument("--characteristic-length-m", type=float, default=1.0)
     plan.add_argument(
@@ -206,6 +216,7 @@ def main(argv=None) -> int:
                 base_link=args.base_link,
                 count=args.count,
                 candidates=args.candidates,
+                input_joints=args.input_joints,
                 seed=args.seed,
                 characteristic_length_m=args.characteristic_length_m,
                 start_configuration=args.start_joints,
@@ -213,6 +224,11 @@ def main(argv=None) -> int:
                 force=args.force,
             )
             print(json.dumps(report, indent=2, allow_nan=False))
+            if (
+                args.input_joints is not None
+                and report["selection_method"] == "all-input"
+            ):
+                return 0
             return 0 if report["full_rank"] else 1
         elif args.command in {"view", "view-fit"}:
             if args.duration is not None and (

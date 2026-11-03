@@ -32,3 +32,10 @@ dataset.save("observations.npz")
 
 训练回放使用真实归档的训练观测并重新计算相应指标；默认回放使用独立验证观测。
 这两种角色不会因行数相同而互换，也不会把手动探索的合成真值误差视为留出验证。
+
+`plan --input-joints` 只读取给定NPY数组或NPZ中的 `joint_positions`、可选 `joint_names`
+与 `sample_indices`，不要求也不读取 `observed_poses`。原采集ID按数据集相同的规则验证为
+唯一、非负int64，随后保存在计划的 `source_sample_indices[candidate_count]` 中；访问行
+`i` 对应 `source_sample_indices[candidate_indices[i]]`。训练回放同时显示该来源ID。
+输入无名称时，计划报告的 `input_joint_identity_verified` 为false，输出的模型关节名称
+不改变这一事实。来源文件哈希绑定读取的字节，移动计划后无需保留原输入文件。

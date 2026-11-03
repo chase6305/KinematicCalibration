@@ -41,6 +41,7 @@ class ExperimentPlayback:
 
         self.path = Path(path)
         self.split = split
+        self.source_sample_indices = None
         self.report, self.dataset, self.model = load_experiment_bundle(path)
         self.nominal = NumpyBackend.from_urdf(
             self.path / "nominal.urdf",
@@ -56,6 +57,14 @@ class ExperimentPlayback:
             self.model = self.model.copy()
             self.report = self.report.copy()
             joints = self.dataset.joint_positions
+            if "training_plan" in self.report:
+                from ..planning import load_pose_plan
+
+                plan = load_pose_plan(self.path / "plan.npz")
+                if plan.source_sample_indices is not None:
+                    self.source_sample_indices = plan.source_sample_indices[
+                        plan.candidate_indices
+                    ]
             for name, (axes, home) in (
                 ("nominal", self.nominal.poe_parameters()),
                 ("truth", self.truth.poe_parameters()),

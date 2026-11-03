@@ -31,6 +31,33 @@ def validated_joint_names(
     return tuple(names.tolist())
 
 
+def validated_sample_indices(value, count: int, *, label="sample_indices") -> np.ndarray:
+    """Normalize unique non-negative int64 identities for synchronized rows."""
+    raw_indices = np.asarray(value)
+    if raw_indices.ndim != 1 or len(raw_indices) != count:
+        raise ValueError(f"{label} must have shape [N]")
+    if raw_indices.dtype.kind not in "iuf" or not np.isfinite(raw_indices).all():
+        raise ValueError(f"{label} must contain finite real integers")
+    if (
+        np.any(raw_indices < 0)
+        or (raw_indices.dtype.kind == "f" and np.any(raw_indices >= 2.0**63))
+        or (
+            raw_indices.dtype.kind in "iu"
+            and np.any(raw_indices > np.iinfo(np.int64).max)
+        )
+    ):
+        raise ValueError(f"{label} must fit non-negative int64 integers")
+    try:
+        sample_indices = raw_indices.astype(np.int64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must contain integers") from exc
+    if not np.array_equal(raw_indices, sample_indices):
+        raise ValueError(f"{label} must contain integers")
+    if np.any(sample_indices < 0) or len(np.unique(sample_indices)) != count:
+        raise ValueError(f"{label} must be unique and non-negative")
+    return sample_indices
+
+
 def read_dataset_schema_version(path: Path | str) -> int | None:
     """Return the declared schema, or ``None`` for a legacy archive."""
     with np.load(path, allow_pickle=False) as data:
@@ -160,32 +187,7 @@ class KinematicDataset:
         if self.sample_indices is None:
             sample_indices = np.arange(len(joints), dtype=np.int64)
         else:
-            raw_indices = np.asarray(self.sample_indices)
-            if raw_indices.ndim != 1 or len(raw_indices) != len(joints):
-                raise ValueError("sample_indices must have shape [N]")
-            if raw_indices.dtype.kind not in "iuf" or not np.all(
-                np.isfinite(raw_indices)
-            ):
-                raise ValueError("sample_indices must contain finite real integers")
-            if (
-                np.any(raw_indices < 0)
-                or (raw_indices.dtype.kind == "f" and np.any(raw_indices >= 2.0**63))
-                or (
-                    raw_indices.dtype.kind in "iu"
-                    and np.any(raw_indices > np.iinfo(np.int64).max)
-                )
-            ):
-                raise ValueError("sample_indices must fit non-negative int64 integers")
-            try:
-                sample_indices = raw_indices.astype(np.int64)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("sample_indices must contain integers") from exc
-            if not np.array_equal(raw_indices, sample_indices):
-                raise ValueError("sample_indices must contain integers")
-            if np.any(sample_indices < 0) or len(np.unique(sample_indices)) != len(
-                sample_indices
-            ):
-                raise ValueError("sample_indices must be unique and non-negative")
+            sample_indices = validated_sample_indices(self.sample_indices, len(joints))
         object.__setattr__(self, "sample_indices", sample_indices)
         if self.joint_names is not None:
             object.__setattr__(

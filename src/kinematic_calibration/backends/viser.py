@@ -285,6 +285,10 @@ def _create_viewer(playback, *, host: str, port: int):
                 if training and "training_plan" in report and not manual_mode.value:
                     candidate = report["training_plan"]["candidate_indices"][index]
                     error.content += f"\n\nTraining row: {index} · Candidate: {candidate}"
+                    if playback.source_sample_indices is not None:
+                        error.content += (
+                            f" · Source sample: {int(playback.source_sample_indices[index])}"
+                        )
 
     def change_mode(_event):
         with server.atomic():

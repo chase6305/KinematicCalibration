@@ -152,6 +152,13 @@ kincal plan --count 40 --candidates 400 --output outputs/pose-plan.npz
 kincal plan --count 40 --start-joints 0 0 0 0 0 0 --return-to-start \
   --output outputs/pose-plan-round-trip.npz
 
+# 直接访问已选定的一组配置；也支持仅含 [N,DOF] 数组的 .npy
+kincal plan --input-joints chosen-poses.npz --output outputs/chosen-plan.npz
+
+# 需要筛选子集时才指定数量
+kincal plan --input-joints candidate-poses.npz --count 20 \
+  --output outputs/selected-plan.npz
+
 # 按已保存的访问顺序，从独立扰动真值生成合成观测并拟合
 kincal demo --plan outputs/pose-plan-round-trip.npz --output outputs/planned-demo
 kincal view outputs/planned-demo --split training
@@ -170,10 +177,18 @@ kincal view outputs/planned-demo  # 独立验证集
 出发；`--start-joints` 按 URDF 关节列顺序提供，`--return-to-start` 要求明确起点。
 距离按原始弧度计算，不隐式绕过 ±π，也不代表执行时间。
 
+`--input-joints` 接受NPY数组，或包含 `joint_positions[N,DOF]` 的NPZ，单位为弧度。
+NPZ可附带按列排列的 `joint_names` 和原始 `sample_indices`，也可直接使用已有数据集；
+规划不会读取其中的观测位姿。名称存在时必须与URDF链完全相同；无名输入按URDF关节顺序
+解释，并记录输入列身份未验证。默认访问全部行，保留重复配置的独立行身份；指定较小
+`--count` 时才做D-optimal筛选。少量或欠定配置可以成功规划访问顺序，拟合仍检查样本数
+和可观测性。
+
 计划 NPZ schema 2 中，`planned_joint_positions` 按访问顺序排列；`candidate_indices`
 指向原候选行，`selected_candidate_indices` 保留 D-optimal 选姿顺序，`visit_order` 是两者
 之间的排列。另存关节名称、限位、每段距离及元数据。起始配置和可选回程记录在元数据与
 距离中，不额外算作标定姿态。输出尚未做碰撞或相机可见性检查，也不生成带速度约束的轨迹。
+给定输入文件时另存文件哈希；原采集ID保存为 `source_sample_indices`，不替代候选行号。
 `demo --plan` 核对同一名义URDF、关节列、限位和坐标链，按计划的行顺序采样；
 不能同时使用 `--samples`。完整计划随实验归档，训练行号与候选ID映射保留。
 `view --split training` 显示训练姿态与训练误差，默认 `view` 继续显示独立验证集。
