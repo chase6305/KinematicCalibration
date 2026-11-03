@@ -1,5 +1,8 @@
 name: Python calibration checks
 on: [push, pull_request]
+env:
+  OPENBLAS_NUM_THREADS: '1'
+  OMP_NUM_THREADS: '1'
 jobs:
   headless:
     runs-on: ubuntu-latest
