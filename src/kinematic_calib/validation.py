@@ -78,19 +78,23 @@ def evaluate_saved_poe(
     source_indices = dataset.sample_indices
 
     generators = [_twist_matrix(axis) for axis in axes]
-    position_errors = []
-    orientation_errors = []
-    for q, measured in zip(joints, observed, strict=True):
-        predicted = np.eye(4)
-        for generator, position in zip(generators, q, strict=True):
-            predicted = predicted @ expm(generator * position)
-        predicted = predicted @ zero_pose
-        delta = measured @ np.linalg.inv(predicted)
-        position_errors.append(np.linalg.norm(measured[:3, 3] - predicted[:3, 3]))
-        orientation_errors.append(Rotation.from_matrix(delta[:3, :3]).magnitude())
-
-    position_errors = np.asarray(position_errors)
-    orientation_errors = np.asarray(orientation_errors)
+    predicted_poses = np.repeat(np.eye(4)[None], len(joints), axis=0)
+    # General matrix exponentials keep this FK independent of the optimizer.
+    for generator, positions in zip(generators, joints.T, strict=True):
+        predicted_poses = predicted_poses @ expm(positions[:, None, None] * generator)
+    predicted_poses = predicted_poses @ zero_pose
+    # Retain the general inverse for accepted near-rigid home matrices, whose
+    # small roundoff need not have an inverse equal to a rigid transpose.
+    relative_poses = observed @ np.linalg.inv(predicted_poses)
+    # Preserve scalar norm accumulation so near-tied worst-sample IDs agree
+    # with the original validator as well as the reported residual values.
+    position_errors = np.asarray(
+        [
+            np.linalg.norm(measured[:3, 3] - predicted[:3, 3])
+            for measured, predicted in zip(observed, predicted_poses, strict=True)
+        ]
+    )
+    orientation_errors = Rotation.from_matrix(relative_poses[:, :3, :3]).magnitude()
     return {
         "samples": int(len(joints)),
         "position_error_mean_m": float(position_errors.mean()),
