@@ -74,25 +74,21 @@ def _improve_order(order, distances, start_index, return_to_start):
     for _ in range(20):
         changed = False
         for first in range(first_movable, count - 1):
-            last = np.arange(first + 1, count)
             preceding = order[first - 1] if first else start_index
-            old_edges = distances[preceding, order[first]] * np.ones(len(last))
-            new_edges = distances[preceding, order[last]].copy()
-            has_successor = last + 1 < count
-            successors = order[last[has_successor] + 1]
-            old_edges[has_successor] += distances[
-                order[last[has_successor]], successors
-            ]
-            new_edges[has_successor] += distances[order[first], successors]
+            candidates = order[first + 1 :]
+            successors = order[first + 2 :]
+            old_edges = np.full(len(candidates), distances[preceding, order[first]])
+            new_edges = distances[preceding, candidates]
+            # Every candidate except the final visit has a successor.
+            old_edges[:-1] += distances[candidates[:-1], successors]
+            new_edges[:-1] += distances[order[first], successors]
             if return_to_start:
-                old_edges[~has_successor] += distances[
-                    order[last[~has_successor]], start_index
-                ]
-                new_edges[~has_successor] += distances[order[first], start_index]
+                old_edges[-1] += distances[candidates[-1], start_index]
+                new_edges[-1] += distances[order[first], start_index]
             improvements = old_edges - new_edges
             best = int(np.argmax(improvements))
             if improvements[best] > tolerance:
-                end = int(last[best]) + 1
+                end = first + best + 2
                 order[first:end] = order[first:end][::-1]
                 changed = True
         if not changed:

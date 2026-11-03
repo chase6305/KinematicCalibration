@@ -7,8 +7,14 @@ Set BLAS threads before running Python, for example::
         benchmarks/profile_planning.py --cases 400:40 2000:80 5000:120 \
         --output outputs/planning-profile.json
 
+For routing alone, including 6/7 DOF and implicit/open/closed starts::
+
+    OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python \
+        benchmarks/profile_planning.py --route-counts 40 200 1000 --repeats 5 \
+        --output outputs/routing-profile.json
+
 Imports, candidate generation, warmup and validation are outside timed calls.
-The route starts at zero joint angles; distances are joint-space radians.
+Explicit starts use zero joint angles; distances are joint-space radians.
 """
 
 import argparse
@@ -107,6 +113,65 @@ def measure_case(backend, candidate_count, selected_count, seed, repeats):
     }
 
 
+def measure_route_case(route_count, dof, mode, seed, repeats):
+    positions = np.random.default_rng(seed + route_count + dof).uniform(
+        -3.0, 3.0, (route_count, dof)
+    )
+    original_positions = positions.copy()
+    start = None if mode == "implicit_open" else np.zeros(dof)
+    closed = mode == "explicit_closed"
+    reference = routing.plan_visit_order(
+        positions, start_configuration=start, return_to_start=closed
+    )
+    runs = []
+    for _ in range(repeats):
+        wall_started = time.perf_counter()
+        cpu_started = time.process_time()
+        visits = routing.plan_visit_order(
+            positions, start_configuration=start, return_to_start=closed
+        )
+        wall_seconds = time.perf_counter() - wall_started
+        cpu_seconds = time.process_time() - cpu_started
+        np.testing.assert_array_equal(positions, original_positions)
+        np.testing.assert_array_equal(np.sort(visits.indices), np.arange(route_count))
+        np.testing.assert_array_equal(visits.indices, reference.indices)
+        np.testing.assert_array_equal(
+            visits.segment_distances_rad, reference.segment_distances_rad
+        )
+        assert visits.total_distance_rad == reference.total_distance_rad
+        path = positions[visits.indices]
+        if start is not None:
+            path = np.vstack([start, path])
+            if closed:
+                path = np.vstack([path, start])
+        checked_segments = np.linalg.norm(np.diff(path, axis=0), axis=1)
+        np.testing.assert_allclose(visits.segment_distances_rad, checked_segments)
+        assert visits.total_distance_rad <= visits.initial_distance_rad
+        runs.append(
+            {
+                "routing_wall_seconds": wall_seconds,
+                "routing_cpu_seconds": cpu_seconds,
+                "initial_distance_rad": visits.initial_distance_rad,
+                "total_distance_rad": visits.total_distance_rad,
+                "visit_indices_sha256": hashlib.sha256(
+                    visits.indices.tobytes()
+                ).hexdigest(),
+            }
+        )
+    return {
+        "route_count": route_count,
+        "dof": dof,
+        "mode": mode,
+        "median_routing_wall_seconds": statistics.median(
+            row["routing_wall_seconds"] for row in runs
+        ),
+        "median_routing_cpu_seconds": statistics.median(
+            row["routing_cpu_seconds"] for row in runs
+        ),
+        "runs": runs,
+    }
+
+
 def metadata():
     import robotkinecal.calibration as core
 
@@ -139,8 +204,15 @@ def metadata():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--cases", nargs="+", type=_case, default=[(400, 40), (2000, 80)]
+    )
+    modes.add_argument(
+        "--route-counts",
+        nargs="+",
+        type=int,
+        help="benchmark routing only for each N, with 6/7 DOF and all start modes",
     )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--seed", type=int, default=20261103)
@@ -148,17 +220,37 @@ def main():
     args = parser.parse_args()
     if args.repeats < 1 or args.seed < 0:
         parser.error("repeats must be positive and seed must be non-negative")
-    backend = NumpyBackend.from_urdf(example_urdf(), end_link="ee_link")
+    if args.route_counts is not None and min(args.route_counts) < 1:
+        parser.error("route counts must be positive")
     report = {
         "metadata": metadata(),
         "seed": args.seed,
         "repeats": args.repeats,
         "cases": [],
     }
-    for candidate_count, selected_count in args.cases:
-        case = measure_case(
-            backend, candidate_count, selected_count, args.seed, args.repeats
+    if args.route_counts is not None:
+        report["metadata"].update(
+            {
+                "timing_scope": "routing only; imports, warmup, input generation and validation excluded",
+                "joint_positions_rad": "uniform[-3,3], seed + route_count + dof",
+                "start_configuration_rad": "none for implicit_open; zero vector otherwise",
+                "return_to_start": "true for explicit_closed only",
+                "load_average_at_start": os.getloadavg() if hasattr(os, "getloadavg") else None,
+            }
         )
+        cases = (
+            measure_route_case(route_count, dof, mode, args.seed, args.repeats)
+            for route_count in args.route_counts
+            for dof in (6, 7)
+            for mode in ("implicit_open", "explicit_open", "explicit_closed")
+        )
+    else:
+        backend = NumpyBackend.from_urdf(example_urdf(), end_link="ee_link")
+        cases = (
+            measure_case(backend, candidate_count, selected_count, args.seed, args.repeats)
+            for candidate_count, selected_count in args.cases
+        )
+    for case in cases:
         report["cases"].append(case)
         summary = {key: value for key, value in case.items() if key != "runs"}
         summary.update(
