@@ -90,6 +90,7 @@ class CalibrationResult:
         convergence_tolerance: float = 1e-4,
         joints: list | None = None,
         divergence_patience: int = 3,
+        ee_name: str | None = None,
     ) -> None:
         """
         Initialize the calibration result.
@@ -100,8 +101,11 @@ class CalibrationResult:
             The robot model used for the calibration.
         convergence_tolerance: float
             The tolerance to consider that the error has converged.
+        ee_name: str | None
+            Selected end-effector link for URDF export; None permits legacy inference only for one fixed child of the final joint.
         """
         self.robot_model = robot_model
+        self.ee_name = ee_name
         self.joints = (
             list(joints)
             if joints is not None
@@ -446,17 +450,50 @@ class CalibrationResult:
                 "A PoERobot does not describe joint positions, use a DHRobot or ERobot instead."
             )
 
+        # These definitions represent consecutive joint frames and one direct
+        # fixed tool edge; collapsing fixed paths would modify the wrong origin.
+        if (
+            not self.joints
+            or self.joints[0].parent is not self.robot_model.base_link
+            or any(
+                joint.parent is not previous
+                for previous, joint in zip(self.joints, self.joints[1:])
+            )
+        ):
+            raise ValueError(
+                "URDF export requires directly connected selected joints; "
+                "fixed paths before or between joints are unsupported"
+            )
+        last_joint = self.joints[-1]
+        if self.ee_name is None:
+            # Preserve the old result constructor for unambiguous serial chains.
+            children = list(last_joint.children)
+            if len(children) != 1:
+                raise ValueError("URDF export requires an explicit end-effector name")
+            (end_link,) = children
+        else:
+            end_link = self.robot_model.link_dict.get(self.ee_name)
+        if (
+            end_link is None
+            or end_link.parent is not last_joint
+            or end_link.isjoint
+        ):
+            raise ValueError(
+                "URDF export requires a direct fixed tool link after the last "
+                "selected joint; multi-link fixed tool paths are unsupported"
+            )
+
         joint_definitions = []
         previous_link_pose = SE3()
-        for i, joint in enumerate(self.joints):
+        for joint_index, joint in enumerate(self.joints):
             joint_name = f"{joint.parent.name}-{joint.name}"
-            zero_conf_joint_pose = zero_conf_joint_poses[i]
+            zero_conf_joint_pose = zero_conf_joint_poses[joint_index]
 
             # Pose of the joint, relative to the parent frame,
             # when the robot is in the zero configuration
-            X = previous_link_pose.inv() * zero_conf_joint_pose
-            rpy = X.rpy(unit="rad", order="zyx")
-            xyz = X.t
+            parent_t_joint = previous_link_pose.inv() * zero_conf_joint_pose
+            rpy = parent_t_joint.rpy(unit="rad", order="zyx")
+            xyz = parent_t_joint.t
 
             joint_def = {}
             joint_def["name"] = joint_name
@@ -467,11 +504,11 @@ class CalibrationResult:
             previous_link_pose = zero_conf_joint_pose
 
         # End-effector
-        joint_name = f"{self.joints[-1].name}-{self.joints[-1].children[0].name}"
+        joint_name = f"{last_joint.name}-{end_link.name}"
         zero_conf_ee_pose = self.iteration_results[-1].zero_conf_EE_pose
-        X = previous_link_pose.inv() * zero_conf_ee_pose
-        rpy = X.rpy(unit="rad", order="zyx")
-        xyz = X.t
+        joint_t_ee = previous_link_pose.inv() * zero_conf_ee_pose
+        rpy = joint_t_ee.rpy(unit="rad", order="zyx")
+        xyz = joint_t_ee.t
         joint_def = {}
         joint_def["name"] = joint_name
         joint_def["xyz"] = xyz
@@ -618,8 +655,7 @@ class SerialRobotKineCal:
             # when the joint angles are zero.
             self.joint_local_nominal_poses = [joint.A() for joint in self.joints]
 
-            # For each joint, define the screw axis of a revolute joint rotating about Z
-            # and record the pose of the joint when the robot is in the zero configuration.
+            # Express each joint's actual local rotation axis in the base frame.
             self.joint_zero_conf_poses = []
             unit_axes = {"Rx": np.eye(3)[0], "Ry": np.eye(3)[1], "Rz": np.eye(3)[2]}
             for chain_link in chain_links:
@@ -1255,7 +1291,11 @@ class SerialRobotKineCal:
             if 6 * self.N_OBSERVATIONS < 4 * self.N_JOINTS + 6:
                 raise ValueError("Not enough observations to solve.")
 
-        calibration_result = CalibrationResult(self.robot_model, joints=self.joints)
+        calibration_result = CalibrationResult(
+            self.robot_model,
+            joints=self.joints,
+            ee_name=getattr(self, "ee_name", None),
+        )
 
         if self.position_only:
             row_weights = np.full(self.OBS_SIZE * self.N_OBSERVATIONS, position_weight)

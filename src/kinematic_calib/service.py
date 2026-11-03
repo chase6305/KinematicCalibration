@@ -143,7 +143,11 @@ def fit_dataset(
     if not identity["verified"]:
         logging.getLogger(__name__).warning("%s", identity["reason"])
     dataset.validate_solver_sample_count()
-    if getattr(calibrator, "robot_model", None) is not None:
+    # The URDF cross-check needs link frames; a pure POE model has none.
+    if (
+        getattr(calibrator, "robot_model", None) is not None
+        and getattr(calibrator, "joint_zero_conf_poses", None) is not None
+    ):
         validate_nominal_poe(calibrator, dataset.joint_positions[0])
 
     camera_t_base = ee_t_target_estimate = initialization = None

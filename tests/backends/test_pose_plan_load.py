@@ -3,9 +3,12 @@
 import hashlib
 import json
 import os
+import struct
 import subprocess
 import sys
+import zlib
 from types import SimpleNamespace
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import numpy as np
 import pytest
@@ -255,3 +258,68 @@ assert 'robotkinecal' not in sys.modules
         capture_output=True,
         text=True,
     )
+
+
+def test_deflate_corrupt_plan_is_an_input_error_for_api_and_cli(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "plan.npz"
+    save_pose_plan(path, count=1, candidates=1, seed=5)
+    assert load_pose_plan(path).planned_joint_positions.shape == (1, 6)
+    content = bytearray(path.read_bytes())
+    with ZipFile(path) as archive:
+        member = archive.getinfo("planned_joint_positions.npy")
+        assert member.compress_type == ZIP_DEFLATED
+        name_size, extra_size = struct.unpack_from(
+            "<HH", content, member.header_offset + 26
+        )
+        offset = member.header_offset + 30 + name_size + extra_size
+    # Reject one reserved block type, keeping this archive only a few kilobytes.
+    content[offset] = (content[offset] & ~0x06) | 0x06
+    assert len(content) < 4096
+    original = bytes(content)
+    path.write_bytes(original)
+    real_load = np.load
+    streams = []
+
+    def tracked_load(*args, **kwargs):
+        archive = real_load(*args, **kwargs)
+        streams.append(archive.zip.fp)
+        return archive
+
+    monkeypatch.setattr("kinematic_calib.io_utils.np.load", tracked_load)
+    with pytest.raises(ValueError) as error:
+        load_pose_plan(path)
+    assert str(path) in str(error.value)
+    assert isinstance(error.value.__cause__, zlib.error)
+    assert len(streams) == 1 and streams[0].closed
+
+    output = tmp_path / "demo"
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kinematic_calibration.cli",
+            "demo",
+            "--plan",
+            str(path),
+            "--output",
+            str(output),
+            "--max-iterations",
+            "1",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert completed.returncode == 2, completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert str(path) in completed.stderr
+    assert completed.stdout == ""
+    assert path.read_bytes() == original
+    assert set(tmp_path.iterdir()) == {path}

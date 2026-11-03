@@ -257,11 +257,14 @@ def run_experiment(
         training_plan = None
         if plan_bytes is not None:
             (stage / _PLAN_FILE).write_bytes(plan_bytes)
-            training_plan = load_pose_plan(
-                stage / _PLAN_FILE,
-                backend=nominal,
-                source_urdf_sha256=source_hash,
-            )
+            try:
+                training_plan = load_pose_plan(
+                    stage / _PLAN_FILE,
+                    backend=nominal,
+                    source_urdf_sha256=source_hash,
+                )
+            except ValueError as exc:
+                raise ValueError(f"invalid pose plan {plan_path}: {exc}") from exc
             samples = len(training_plan.planned_joint_positions)
         minimum = minimum_full_pose_samples(nominal.dof)
         if samples < minimum:

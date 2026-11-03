@@ -114,6 +114,9 @@ kinematic-calib calibrate --dataset captures.npz --urdf robot.urdf \
 kinematic-calib --help
 ```
 
+RTB 原点导出对关节间固定路径及工具尾链有限制，详见 [架构说明](docs/architecture.md)；
+NumPy POE 拟合与验证支持指定路径中的固定变换。
+
 `base_T_ee` 数据直接求解机器人几何；相机观测可配合已验证的手眼结果转换到机器人坐标。
 相机与工具外参均未知时求解的是 Camera/Target 复合模型：端点预测可验证，但首关节、
 工具及外参的自由度无法分别唯一归因，不能把复合模型直接视为完整物理 URDF。

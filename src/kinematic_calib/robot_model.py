@@ -132,6 +132,54 @@ def initialize_erobot_screw_axes(calibrator) -> None:
     calibrator.joint_screw_axis = screw_axes
 
 
+def _selected_chain_fk(robot, ee_name: str, dof: int):
+    """Bind FK once, mapping selected columns to the backend's joint indices.
+
+    RTB keeps global joint indices even for a selected end-effector path.
+    Models without link/index metadata retain the existing fkine-only protocol.
+    """
+    fkine = robot.fkine
+    link_dict = getattr(robot, "link_dict", {})
+    end_link = link_dict.get(ee_name)
+    total_joints = getattr(robot, "n", 0)
+    if end_link is None or total_joints <= 0:
+        return lambda positions: fkine(positions, end=ee_name)
+
+    selected = []
+    visited = set()
+    link = end_link
+    while link is not None:
+        if id(link) in visited:
+            raise ValueError("the selected FK chain contains a cycle")
+        visited.add(id(link))
+        if link.isjoint:
+            selected.append(link)
+        link = link.parent
+    selected.reverse()
+    indices = [getattr(joint, "jindex", None) for joint in selected]
+    if not indices or any(index is None for index in indices):
+        return lambda positions: fkine(positions, end=ee_name)
+    if len(indices) != dof:
+        raise ValueError(
+            f"selected chain has {len(indices)} joints but joint_positions has {dof} columns"
+        )
+    if (
+        any(not isinstance(index, (int, np.integer)) for index in indices)
+        or len(set(indices)) != len(indices)
+        or min(indices) < 0
+        or max(indices) >= total_joints
+    ):
+        raise ValueError("the selected FK chain has invalid global joint indices")
+    indices = np.asarray(indices, dtype=int)
+
+    def forward(positions):
+        full_positions = np.zeros(total_joints)
+        full_positions[indices] = positions
+        return fkine(full_positions, end=ee_name)
+
+    return forward
+
+
 def validate_nominal_poe(calibrator, joint_positions, atol: float = 1e-8) -> None:
     """Check that RobotKineCal's nominal POE agrees with the URDF FK."""
     from spatialmath import SE3, Twist3
@@ -141,7 +189,10 @@ def validate_nominal_poe(calibrator, joint_positions, atol: float = 1e-8) -> Non
     for axis, position in zip(calibrator.joint_screw_axis, q, strict=True):
         poe_pose *= Twist3(axis).exp(position)
     poe_pose *= calibrator.zero_conf_EE_pose
-    fk_pose = calibrator.robot_model.fkine(q, end=calibrator.ee_name)
+    forward = _selected_chain_fk(
+        calibrator.robot_model, calibrator.ee_name, calibrator.N_JOINTS
+    )
+    fk_pose = forward(q)
     if not np.allclose(poe_pose.A, fk_pose.A, atol=atol):
         position_error = np.linalg.norm(poe_pose.t - fk_pose.t)
         rotation_error = np.linalg.norm((fk_pose.inv() @ poe_pose).log(twist=True)[3:])
@@ -158,8 +209,14 @@ def estimate_composite_extrinsics(calibrator, joint_positions, observations):
     from scipy.spatial.transform import Rotation
     from spatialmath import SE3, Twist3
 
+    from robotkinecal._batch import pose_log_batch
+
+    from .dataset import _validate_transforms
+
     joints = np.asarray(joint_positions, dtype=float)
-    observed = np.asarray(observations, dtype=float)
+    observed = _validate_transforms("observations", observations)
+    if len(joints) != len(observed):
+        raise ValueError("joint and observation sample counts must match")
 
     def forward(q):
         pose = SE3()
@@ -185,12 +242,9 @@ def estimate_composite_extrinsics(calibrator, joint_positions, observations):
 
     def residual(parameters):
         camera_t_base, ee_t_target = unpack(parameters)
-        values = []
-        for measured, base_t_ee in zip(observed, nominal, strict=True):
-            predicted = camera_t_base @ base_t_ee @ ee_t_target
-            delta = measured @ np.linalg.inv(predicted)
-            values.extend(SE3(delta).log(twist=True))
-        return np.asarray(values)
+        predicted = camera_t_base @ nominal @ ee_t_target
+        relative = observed @ np.linalg.inv(predicted)
+        return pose_log_batch(relative[:, :3, :3], relative[:, :3, 3]).reshape(-1)
 
     result = least_squares(residual, initial, method="trf")
     if not result.success:
@@ -234,6 +288,14 @@ def get_identifiable_urdf_joint_definitions(
 
     if calibrator.joint_zero_conf_poses is None:
         raise ValueError("joint zero-configuration poses are unavailable")
+    if any(
+        joint.parent is not previous
+        for previous, joint in zip(calibrator.joints, calibrator.joints[1:])
+    ):
+        raise ValueError(
+            "partial URDF definitions require directly connected active joints; "
+            "fixed paths between active joints are unsupported"
+        )
     base_t_camera = SE3(camera_t_base).inv()
     calibrated_poses = [
         base_t_camera @ pose for pose in calibrator.joint_zero_conf_poses
@@ -339,6 +401,7 @@ def estimate_joint_zero_offsets(
     ):
         raise ValueError("max_offset_rad must be a positive finite value")
     max_offset_rad = float(raw_bound)
+    forward = _selected_chain_fk(robot, ee_name, dof)
 
     if self_calibrating:
         from robotkinecal import SerialRobotKineCal
@@ -408,7 +471,7 @@ def estimate_joint_zero_offsets(
         current_camera_t_base, current_ee_t_target, offsets = unpack(parameters)
         base_t_ee = np.asarray(
             [
-                robot.fkine(configuration + offsets, end=ee_name).A
+                forward(configuration + offsets).A
                 for configuration in joints
             ]
         )

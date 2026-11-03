@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import tempfile
+import zlib
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Sequence
@@ -17,14 +18,14 @@ def open_npz(path: Path | str) -> Iterator[np.lib.npyio.NpzFile]:
     """Open a pickle-free NPZ and report decoding failures with its path."""
     try:
         archive = np.load(path, allow_pickle=False)
-    except (EOFError, ValueError, BadZipFile) as exc:
+    except (EOFError, ValueError, BadZipFile, zlib.error) as exc:
         raise ValueError(f"invalid NPZ archive {path}: {exc}") from exc
     if not isinstance(archive, np.lib.npyio.NpzFile):
         raise ValueError(f"expected an NPZ archive: {path}")
     with archive:
         try:
             yield archive
-        except (EOFError, BadZipFile) as exc:
+        except (EOFError, BadZipFile, zlib.error) as exc:
             raise ValueError(f"invalid NPZ archive {path}: {exc}") from exc
 
 

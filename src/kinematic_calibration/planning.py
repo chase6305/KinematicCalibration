@@ -82,6 +82,7 @@ def load_pose_plan(
     import json
 
     from kinematic_calib.dataset import validated_joint_names, validated_sample_indices
+    from kinematic_calib.io_utils import open_npz
 
     from .routing import _configurations
 
@@ -96,10 +97,7 @@ def load_pose_plan(
         "singular_values",
         "metadata_json",
     )
-    archive = np.load(path, allow_pickle=False)
-    if not isinstance(archive, np.lib.npyio.NpzFile):
-        raise ValueError("pose plan must be an NPZ archive")
-    with archive:
+    with open_npz(path) as archive:
         if not set(keys).issubset(archive.files):
             raise ValueError("pose plan is missing required arrays")
         arrays = {key: archive[key] for key in keys}
@@ -544,6 +542,8 @@ def save_pose_plan(
     import hashlib
     import io
     import json
+    import zlib
+    from zipfile import BadZipFile
 
     from kinematic_calib.dataset import validated_joint_names, validated_sample_indices
     from kinematic_calib.io_utils import atomic_savez_compressed
@@ -608,32 +608,35 @@ def save_pose_plan(
         # Hash the exact bytes parsed, retaining portable provenance without
         # requiring the original file when this plan is loaded elsewhere.
         input_bytes = input_path.read_bytes()
-        archive = np.load(io.BytesIO(input_bytes), allow_pickle=False)
-        input_names = None
-        input_format = "npy"
-        if isinstance(archive, np.lib.npyio.NpzFile):
-            input_format = "npz"
-            with archive:
-                if "joint_positions" not in archive.files:
-                    raise ValueError("input joint NPZ is missing joint_positions")
-                proposals = _candidate_configurations(
-                    backend, archive["joint_positions"]
-                )
-                if "joint_names" in archive.files:
-                    input_names = validated_joint_names(
-                        archive["joint_names"], backend.dof
+        try:
+            archive = np.load(io.BytesIO(input_bytes), allow_pickle=False)
+            input_names = None
+            input_format = "npy"
+            if isinstance(archive, np.lib.npyio.NpzFile):
+                input_format = "npz"
+                with archive:
+                    if "joint_positions" not in archive.files:
+                        raise ValueError("input joint NPZ is missing joint_positions")
+                    proposals = _candidate_configurations(
+                        backend, archive["joint_positions"]
                     )
-                    if input_names != tuple(backend.joint_names):
-                        raise ValueError(
-                            "input joint_names order does not match model; "
-                            "columns are never automatically reordered"
+                    if "joint_names" in archive.files:
+                        input_names = validated_joint_names(
+                            archive["joint_names"], backend.dof
                         )
-                if "sample_indices" in archive.files:
-                    source_sample_indices = validated_sample_indices(
-                        archive["sample_indices"], len(proposals)
-                    )
-        else:
-            proposals = _candidate_configurations(backend, archive)
+                        if input_names != tuple(backend.joint_names):
+                            raise ValueError(
+                                "input joint_names order does not match model; "
+                                "columns are never automatically reordered"
+                            )
+                    if "sample_indices" in archive.files:
+                        source_sample_indices = validated_sample_indices(
+                            archive["sample_indices"], len(proposals)
+                        )
+            else:
+                proposals = _candidate_configurations(backend, archive)
+        except (EOFError, BadZipFile, zlib.error) as exc:
+            raise ValueError(f"invalid input joint file {input_path}: {exc}") from exc
         candidates = len(proposals)
         count = candidates if count is None else count
         provenance = {

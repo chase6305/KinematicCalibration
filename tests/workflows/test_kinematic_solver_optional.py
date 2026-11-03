@@ -1,5 +1,8 @@
 """Optional numerical integration tests for the vendored RobotKineCal solver."""
 
+import json
+import xml.etree.ElementTree as ET
+
 import numpy as np
 import pytest
 
@@ -11,6 +14,44 @@ from kinematic_calib.robot_model import (
 
 rtb = pytest.importorskip("roboticstoolbox")
 robotkinecal = pytest.importorskip("robotkinecal")
+
+
+def test_pure_poe_model_uses_in_memory_service_without_urdf_link_frames():
+    from spatialmath import SE3, Twist3
+
+    from kinematic_calib import KinematicDataset, ObservationFrame, fit_dataset
+    from kinematic_calib.validation import evaluate_saved_poe
+    from kinematic_calibration.backends.numpy import NumpyBackend
+    from kinematic_calibration.experiment import example_urdf
+
+    nominal = NumpyBackend.from_urdf(example_urdf(), end_link="ee_link")
+    axes, home = nominal.poe_parameters()
+    robot = rtb.PoERobot(
+        [rtb.PoELink(Twist3(axis)) for axis in axes], SE3(home, check=False)
+    )
+    calibrator = robotkinecal.SerialRobotKineCal(robot)
+    assert calibrator.joint_zero_conf_poses is None
+    truth = nominal.perturbed(seed=59)
+    joints = np.random.default_rng(58).uniform(-1.5, 1.5, (40, nominal.dof))
+    dataset = KinematicDataset(
+        joints[:30],
+        np.asarray([truth.forward(row) for row in joints[:30]]),
+        ObservationFrame.BASE_T_EE,
+        joint_names=nominal.joint_names,
+    )
+
+    fit = fit_dataset(dataset, calibrator, model_joint_names=nominal.joint_names)
+    errors = evaluate_saved_poe(
+        fit.screw_axes,
+        fit.zero_pose.A,
+        joints[30:],
+        np.asarray([truth.forward(row) for row in joints[30:]]),
+    )
+
+    assert fit.result.has_converged
+    assert fit.joint_identity["verified"]
+    assert errors["position_error_max_m"] < 1e-7
+    assert errors["orientation_error_max_rad"] < 1e-7
 
 
 @pytest.mark.parametrize("dof", [1, 2, 4, 7, 8])
@@ -362,3 +403,284 @@ def test_injected_encoder_bias_is_recovered_with_opposite_sign() -> None:
 
     assert result["full_rank"]
     assert np.allclose(result["offsets"], -injected_bias, atol=1e-8)
+
+
+def _selected_chain_urdf(tmp_path, case, *, fixed_path=None):
+    intermediate = case != "full"
+    branched = case == "branched"
+    root = ET.Element("robot", name="selected_chain")
+    # RTB assigns global indices in link traversal order. Put the unrelated
+    # motor first so the selected columns map to [1, 2], not [0, 1].
+    links = ["base"] + (["side"] if branched else [])
+    links += ["shoulder", "elbow", "wrist", "tip"]
+    if intermediate:
+        links.append("tool")
+    if fixed_path is not None:
+        links.append("spacer")
+    for name in links:
+        ET.SubElement(root, "link", name=name)
+
+    def joint(name, parent, child, xyz, axis=None):
+        element = ET.Element(
+            "joint", name=name, type="revolute" if axis is not None else "fixed"
+        )
+        ET.SubElement(element, "parent", link=parent)
+        ET.SubElement(element, "child", link=child)
+        ET.SubElement(element, "origin", xyz=xyz, rpy="0 0 0")
+        if axis is not None:
+            ET.SubElement(element, "axis", xyz=axis)
+            ET.SubElement(
+                element, "limit", lower="-3", upper="3", effort="5", velocity="2"
+            )
+        return element
+
+    # XML declaration order differs from selected chain order; wrist is the
+    # elbow's first child even when the requested end is the fixed tool.
+    joints = [
+        joint("j_wrist", "elbow", "wrist", "0.1 0.05 0.2", "1 0 0"),
+        joint("j_tip", "wrist", "tip", "0.1 0.2 0.1"),
+    ]
+    if intermediate:
+        joints.append(joint("j_tool", "elbow", "tool", "0.2 0.1 0.3"))
+    if branched:
+        joints.append(joint("j_side", "base", "side", "-0.1 0.2 0.05", "0 1 0"))
+    joints.extend(
+        [
+            joint(
+                "j_elbow", "spacer" if fixed_path == "between" else "shoulder",
+                "elbow", "0.3 0 0.2", "0 1 0",
+            ),
+            joint(
+                "j_shoulder", "spacer" if fixed_path == "before" else "base",
+                "shoulder", "0.1 0.2 0.1", "0 0 1",
+            ),
+        ]
+    )
+    end = "tool" if intermediate else "tip"
+    if fixed_path is not None:
+        parent = {"before": "base", "between": "shoulder", "tail": end}[fixed_path]
+        joints.append(joint("j_spacer", parent, "spacer", "0.02 0.03 0.04"))
+        if fixed_path == "tail":
+            end = "spacer"
+    root.extend(joints)
+    path = tmp_path / "selected.urdf"
+    ET.ElementTree(root).write(path, encoding="unicode")
+    return path, end
+
+
+@pytest.mark.parametrize("case", ["full", "intermediate", "branched"])
+def test_selected_urdf_chain_fits_and_exports_in_local_joint_order(tmp_path, case):
+    from kinematic_calib import KinematicDataset, ObservationFrame
+    from kinematic_calib.cli import main
+    from kinematic_calib.robot_model import load_calibration_model, validate_nominal_poe
+    from kinematic_calibration.backends.numpy import NumpyBackend
+
+    source, end = _selected_chain_urdf(tmp_path, case)
+    source_bytes = source.read_bytes()
+    nominal = NumpyBackend.from_urdf(source, end_link=end)
+    model = load_calibration_model(source, end, backend="rtb")
+    calibrator = model.calibrator
+    expected_indices = [1, 2] if case == "branched" else list(range(nominal.dof))
+    assert [joint.jindex for joint in calibrator.joints] == expected_indices
+    assert tuple(model.joint_names) == nominal.joint_names
+    if case != "full":
+        assert calibrator.joints[-1].children[0].name == "wrist"
+    joints = np.random.default_rng(791).uniform(-1.0, 1.0, (40, nominal.dof))
+    validate_nominal_poe(calibrator, joints[0])
+    np.testing.assert_allclose(
+        calibrator.forward_kinematics_batch(joints),
+        [nominal.forward(q) for q in joints], atol=1e-12, rtol=0,
+    )
+    # Retain the four original positional result arguments.
+    legacy = robotkinecal.CalibrationResult(
+        calibrator.robot_model, 1e-5, calibrator.joints, 7
+    )
+    assert legacy.convergence_tolerance == 1e-5
+    assert legacy.divergence_patience == 7
+
+    truth = nominal.perturbed(seed=47, translation_std_m=0.001, rotation_std_rad=0.002)
+    training = tmp_path / "training.npz"
+    KinematicDataset(
+        joints[:30], np.asarray([truth.forward(q) for q in joints[:30]]),
+        ObservationFrame.BASE_T_EE, joint_names=nominal.joint_names,
+    ).save(training)
+    parameters = tmp_path / "fit.npz"
+    assert main(
+        [
+            "solve", "--backend", "rtb", "--dataset", str(training),
+            "--urdf", str(source), "--ee-name", end,
+            "--model-mode", "robot-body", "--output", str(parameters), "--quiet",
+        ]
+    ) == 0
+    report_path = parameters.with_suffix(".json")
+    report = json.loads(report_path.read_text())
+    expected_terminal = "wrist-tip" if case == "full" else "elbow-tool"
+    assert report["raw_solver_urdf_joint_definitions"][-1]["name"] == expected_terminal
+    assert report["joint_names"] == list(nominal.joint_names)
+    exported = tmp_path / "calibrated.urdf"
+    assert main(
+        [
+            "export-urdf", "--result", str(report_path),
+            "--urdf", str(source), "--output", str(exported),
+        ]
+    ) == 0
+    calibrated = NumpyBackend.from_urdf(exported, end_link=end)
+    np.testing.assert_allclose(
+        [calibrated.forward(q) for q in joints[30:]],
+        [truth.forward(q) for q in joints[30:]], atol=1e-7, rtol=0,
+    )
+    before = {joint.get("name"): joint for joint in ET.parse(source).getroot().findall("joint")}
+    after = {joint.get("name"): joint for joint in ET.parse(exported).getroot().findall("joint")}
+    changed_names = set(nominal.joint_names) | {"j_tip" if case == "full" else "j_tool"}
+    for name in set(before) - changed_names:
+        assert after[name].find("origin").attrib == before[name].find("origin").attrib
+    assert source.read_bytes() == source_bytes
+
+
+@pytest.mark.parametrize("case", ["full", "intermediate", "branched"])
+def test_selected_chain_zero_offsets_use_global_fk_indices(tmp_path, monkeypatch, case):
+    from kinematic_calib.robot_model import load_calibration_model
+    from kinematic_calibration.backends.numpy import NumpyBackend
+
+    source, end = _selected_chain_urdf(tmp_path, case)
+    truth = NumpyBackend.from_urdf(source, end_link=end)
+    model = load_calibration_model(source, end, backend="rtb")
+    robot = model.calibrator.robot_model
+    indices = [joint.jindex for joint in model.calibrator.joints]
+    actual = np.random.default_rng(792).uniform(-1.0, 1.0, (24, truth.dof))
+    bias = np.array([0.012, -0.021, 0.016])[:truth.dof]
+    recorded = actual + bias
+    observed = np.asarray([truth.forward(q) for q in actual])
+    received_positions = []
+    original_fkine = robot.fkine
+
+    def checked_fkine(positions, **kwargs):
+        received_positions.append(np.asarray(positions).copy())
+        return original_fkine(positions, **kwargs)
+
+    monkeypatch.setattr(robot, "fkine", checked_fkine)
+    result = estimate_joint_zero_offsets(
+        robot, end, recorded, observed,
+        camera_t_base=np.eye(4), ee_t_target=np.eye(4),
+    )
+
+    assert result["full_rank"]
+    assert result["estimated_indices"].tolist() == list(range(truth.dof))
+    np.testing.assert_allclose(result["offsets"], -bias, atol=1e-8, rtol=0)
+    assert result["position_error_max_m"] < 1e-8
+    assert result["orientation_error_max_rad"] < 1e-8
+    positions = np.asarray(received_positions)
+    assert positions.shape[1] == robot.n
+    unselected = sorted(set(range(robot.n)) - set(indices))
+    np.testing.assert_array_equal(positions[:, unselected], 0.0)
+
+
+@pytest.mark.parametrize("fixed_path", ["before", "between", "tail"])
+def test_urdf_export_rejects_unrepresentable_fixed_paths(tmp_path, fixed_path):
+    from kinematic_calib import (
+        FitOptions,
+        KinematicDataset,
+        ObservationFrame,
+        fit_dataset,
+    )
+    from kinematic_calib.robot_model import load_calibration_model
+    from kinematic_calibration.backends.numpy import NumpyBackend
+
+    source, end = _selected_chain_urdf(tmp_path, "branched", fixed_path=fixed_path)
+    truth = NumpyBackend.from_urdf(source, end_link=end)
+    model = load_calibration_model(source, end, backend="rtb")
+    joints = np.random.default_rng(793).uniform(-1.0, 1.0, (20, truth.dof))
+    dataset = KinematicDataset(
+        joints, np.asarray([truth.forward(q) for q in joints]),
+        ObservationFrame.BASE_T_EE, joint_names=truth.joint_names,
+    )
+    fit = fit_dataset(dataset, model.calibrator, options=FitOptions(max_iterations=3))
+    assert fit.result.ee_name == end
+    with pytest.raises(ValueError, match="URDF export requires"):
+        model.calibrator.get_urdf_xyzrpy(fit.result)
+
+
+def test_partial_definitions_reject_fixed_paths_between_active_joints(tmp_path):
+    from kinematic_calib.robot_model import (
+        get_identifiable_urdf_joint_definitions,
+        load_calibration_model,
+    )
+
+    source, end = _selected_chain_urdf(tmp_path, "branched", fixed_path="between")
+    model = load_calibration_model(source, end, backend="rtb")
+    assert model.calibrator.joints[1].parent.name == "spacer"
+    with pytest.raises(ValueError, match="fixed paths between active joints"):
+        get_identifiable_urdf_joint_definitions(model.calibrator, np.eye(4))
+
+
+@pytest.mark.parametrize(
+    "fixed_path", [None, "before", "tail", "between"],
+    ids=["adjacent", "before-first", "after-last", "between-active"],
+)
+def test_self_calibrating_partial_definitions_respect_fixed_path_scope(
+    tmp_path, caplog, capsys, fixed_path
+):
+    from spatialmath import SE3
+
+    from kinematic_calib import KinematicDataset, ObservationFrame
+    from kinematic_calib.cli import main
+    from kinematic_calibration.backends.numpy import NumpyBackend
+
+    source, end = _selected_chain_urdf(tmp_path, "branched", fixed_path=fixed_path)
+    truth = NumpyBackend.from_urdf(source, end_link=end)
+    joints = np.random.default_rng(794).uniform(-1.0, 1.0, (24, truth.dof))
+    camera_t_base = SE3.RPY([0.2, -0.1, 0.3]) @ SE3.Trans(0.4, -0.2, 1.1)
+    ee_t_target = SE3.RPY([-0.1, 0.15, 0.05]) @ SE3.Trans(0.03, -0.08, 0.12)
+    observations = np.asarray(
+        [camera_t_base.A @ truth.forward(q) @ ee_t_target.A for q in joints]
+    )
+    dataset = tmp_path / "camera-observations.npz"
+    KinematicDataset(
+        joints, observations, ObservationFrame.CAMERA_T_TARGET,
+        joint_names=truth.joint_names,
+    ).save(dataset)
+    parameters = tmp_path / "fit.npz"
+    report_path = parameters.with_suffix(".json")
+    code = main(
+        [
+            "solve", "--backend", "rtb", "--dataset", str(dataset),
+            "--urdf", str(source), "--ee-name", end,
+            "--model-mode", "self-calibrating", "--output", str(parameters),
+            "--quiet",
+        ]
+    )
+    if fixed_path == "between":
+        assert code == 2
+        assert "fixed paths between active joints" in caplog.text
+        captured = capsys.readouterr()
+        assert "Traceback" not in caplog.text + captured.out + captured.err
+        assert not parameters.exists()
+        assert not report_path.exists()
+        return
+
+    assert code == 0
+    report = json.loads(report_path.read_text())
+    definitions = report["identifiable_urdf_joint_definitions"]
+    assert report["partial_urdf_export_supported"] is True
+    assert report["full_urdf_export_supported"] is False
+    assert len(definitions) == 1
+    assert definitions[0]["joint_name"] == "j_elbow"
+    assert definitions[0]["parent_link"] == "shoulder"
+    assert definitions[0]["child_link"] == "elbow"
+    expected = np.eye(4)
+    expected[:3, 3] = [0.3, 0.0, 0.2]
+    # Match the existing extrinsic initialization/fit accuracy, rather than
+    # requiring its least-squares termination to reach matrix-roundoff error.
+    np.testing.assert_allclose(definitions[0]["transform"], expected, atol=1e-7, rtol=0)
+    exported = tmp_path / "partial.urdf"
+    assert main(
+        [
+            "export-urdf", "--result", str(report_path), "--urdf", str(source),
+            "--output", str(exported), "--allow-partial",
+        ]
+    ) == 0
+    partial = NumpyBackend.from_urdf(exported, end_link=end)
+    np.testing.assert_allclose(
+        [partial.forward(q) for q in joints],
+        [truth.forward(q) for q in joints], atol=1e-7, rtol=0,
+    )

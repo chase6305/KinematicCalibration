@@ -150,6 +150,70 @@ def test_fit_service_accepts_independent_exponential_roundoff_without_normalizin
     assert errors["orientation_error_max_rad"] < 1e-10
 
 
+def test_self_calibrating_initialization_preserves_valid_pose_roundoff():
+    from robotkinecal import SerialRobotKineCal
+
+    axes, home = _model()
+    joints = np.random.default_rng(84).uniform(-1.5, 1.5, (32, len(axes)))
+    camera_t_base, ee_t_target = np.eye(4), np.eye(4)
+    camera_t_base[:3, :3] = Rotation.from_rotvec([0.1, -0.2, 0.3]).as_matrix()
+    camera_t_base[:3, 3] = [0.3, -0.2, 0.6]
+    ee_t_target[:3, 3] = [0.03, 0.01, -0.02]
+    observed = camera_t_base @ _forward(axes, home, joints) @ ee_t_target
+    observed[:, 0, 0] += 3e-14
+    original = observed.copy()
+    dataset = KinematicDataset(joints, observed, ObservationFrame.CAMERA_T_TARGET)
+
+    fit = fit_dataset(
+        dataset,
+        SerialRobotKineCal.from_screw_axes(axes, home),
+        options=FitOptions(model_mode="self-calibrating"),
+    )
+
+    np.testing.assert_array_equal(dataset.observed_poses, original)
+    held_out = np.random.default_rng(85).uniform(-1.5, 1.5, (8, len(axes)))
+    errors = evaluate_saved_poe(
+        fit.screw_axes,
+        fit.zero_pose.A,
+        held_out,
+        camera_t_base @ _forward(axes, home, held_out) @ ee_t_target,
+    )
+    assert fit.result.has_converged
+    assert errors["position_error_max_m"] < 1e-8
+    assert errors["orientation_error_max_rad"] < 1e-8
+
+
+def test_composite_initialization_rejects_non_rigid_observations():
+    from kinematic_calib.robot_model import estimate_composite_extrinsics
+    from robotkinecal import SerialRobotKineCal
+
+    axes, home = _model()
+    joints = np.zeros((8, len(axes)))
+    invalid = _forward(axes, home, joints)
+    invalid[:, 0, 0] = 1.01
+
+    with pytest.raises(ValueError, match="orthonormal"):
+        estimate_composite_extrinsics(
+            SerialRobotKineCal.from_screw_axes(axes, home), joints, invalid
+        )
+
+
+@pytest.mark.parametrize("joint_count,pose_count", [(8, 1), (1, 8)])
+def test_composite_initialization_never_broadcasts_measurement_rows(
+    joint_count, pose_count
+):
+    from kinematic_calib.robot_model import estimate_composite_extrinsics
+    from robotkinecal import SerialRobotKineCal
+
+    axes, home = _model()
+    with pytest.raises(ValueError, match="sample counts"):
+        estimate_composite_extrinsics(
+            SerialRobotKineCal.from_screw_axes(axes, home),
+            np.zeros((joint_count, len(axes))),
+            np.repeat(home[None], pose_count, axis=0),
+        )
+
+
 def test_unified_workflow_selects_body_mode_without_handeye(tmp_path, monkeypatch):
     """Direct pose datasets from headless engines need no extrinsic solve."""
     from kinematic_calib.cli import main

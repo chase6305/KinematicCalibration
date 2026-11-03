@@ -962,7 +962,7 @@ def _zero_offset(args: argparse.Namespace) -> int:
         import roboticstoolbox as rtb
     except ImportError as exc:
         raise RuntimeError(
-            "roboticstoolbox is unavailable in the active Conda environment"
+            "roboticstoolbox is unavailable; install kinematic-calibration[robotics]"
         ) from exc
     dataset = KinematicDataset.load(args.dataset)
     dataset_coverage, dataset_quality_warnings = _solver_dataset_quality(
