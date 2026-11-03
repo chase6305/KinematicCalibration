@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
+from zipfile import BadZipFile
 
 import numpy as np
 
@@ -148,7 +149,17 @@ def _validate_quality_threshold_args(args: argparse.Namespace, command: str) -> 
 
 
 def _load_transform(path: Path, name: str) -> np.ndarray:
-    value = np.load(path, allow_pickle=False)
+    """Read one real 4x4 NPY transform without altering its stored values."""
+    try:
+        value = np.load(path, allow_pickle=False)
+    except (EOFError, ValueError, BadZipFile) as exc:
+        raise ValueError(f"invalid NPY transform {name} at {path}: {exc}") from exc
+    if not isinstance(value, np.ndarray):
+        if isinstance(value, np.lib.npyio.NpzFile):
+            value.close()
+        raise ValueError(f"{name} must be stored as an NPY array: {path}")
+    if value.dtype.kind not in "iuf":
+        raise ValueError(f"{name} must contain real numeric values: {path}")
     if value.shape != (4, 4):
         raise ValueError(f"{name} must be a 4x4 .npy matrix")
     if not np.all(np.isfinite(value)):

@@ -1,5 +1,7 @@
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -381,6 +383,125 @@ def test_transform_loader_rejects_non_rigid_matrix(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="not orthonormal"):
         _load_transform(path, "test_transform")
+
+
+@pytest.fixture(params=["npz", "empty", "truncated-zip"])
+def malformed_transform(tmp_path: Path, request: pytest.FixtureRequest) -> Path:
+    path = tmp_path / "base_T_camera.npy"
+    if request.param == "npz":
+        with path.open("wb") as stream:
+            np.savez(stream, transform=np.eye(4))
+    else:
+        path.write_bytes(b"" if request.param == "empty" else b"PK\x03\x04")
+    return path
+
+
+def test_transform_loader_rejects_malformed_files(malformed_transform: Path) -> None:
+    original = malformed_transform.read_bytes()
+    with pytest.raises(ValueError) as error:
+        _load_transform(malformed_transform, "base_T_camera")
+
+    assert "base_T_camera" in str(error.value)
+    assert str(malformed_transform) in str(error.value)
+    assert malformed_transform.read_bytes() == original
+
+
+def test_solve_cli_rejects_malformed_transforms_without_publication(
+    tmp_path: Path, malformed_transform: Path
+) -> None:
+    dataset = tmp_path / "poses.npz"
+    poses = np.repeat(np.eye(4)[None], 2, axis=0)
+    poses[1, :3, 3] = [0.2, 0.1, 0.3]
+    KinematicDataset(
+        np.array([[-0.2], [0.2]]), poses, ObservationFrame.CAMERA_T_TARGET
+    ).save(dataset)
+    urdf = tmp_path / "robot.urdf"
+    urdf.write_text(
+        '<robot name="test"><link name="base"/><link name="tool"/>'
+        '<joint name="joint1" type="revolute"><parent link="base"/>'
+        '<child link="tool"/><axis xyz="0 0 1"/>'
+        '<limit lower="-1" upper="1" effort="1" velocity="1"/></joint></robot>'
+    )
+    target = tmp_path / "ee_T_target.npy"
+    np.save(target, np.eye(4))
+    inputs = {path: path.read_bytes() for path in tmp_path.iterdir()}
+    output = tmp_path / "output" / "fit.npz"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kinematic_calib.cli",
+            "solve",
+            "--dataset",
+            str(dataset),
+            "--urdf",
+            str(urdf),
+            "--ee-name",
+            "tool",
+            "--backend",
+            "numpy",
+            "--model-mode",
+            "robot-body",
+            "--base-t-camera",
+            str(malformed_transform),
+            "--ee-t-target",
+            str(target),
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2, completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert "base_T_camera" in completed.stderr
+    assert str(malformed_transform) in completed.stderr
+    assert set(tmp_path.iterdir()) == set(inputs)
+    assert all(path.read_bytes() == content for path, content in inputs.items())
+    assert not output.exists()
+    assert not output.with_suffix(".json").exists()
+
+
+def test_transform_loader_closes_rejected_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "transform.npy"
+    with path.open("wb") as stream:
+        np.savez(stream, transform=np.eye(4))
+    with np.load(path, allow_pickle=False) as archive:
+        archive_stream = archive.zip.fp
+        monkeypatch.setattr("kinematic_calib.cli.np.load", lambda *args, **kw: archive)
+        with pytest.raises(ValueError):
+            _load_transform(path, "test_transform")
+        assert archive_stream.closed
+
+
+@pytest.mark.parametrize("dtype", [complex, bool, str])
+def test_transform_loader_rejects_non_real_numeric_dtype(
+    tmp_path: Path, dtype: type
+) -> None:
+    transform = np.eye(4).astype(dtype)
+    if dtype is complex:
+        transform[0, 3] = 1j
+    path = tmp_path / "transform.npy"
+    np.save(path, transform)
+
+    with pytest.raises(ValueError, match="must contain real numeric values"):
+        _load_transform(path, "test_transform")
+
+
+@pytest.mark.parametrize("dtype", [int, float])
+def test_transform_loader_accepts_real_numeric_dtype(
+    tmp_path: Path, dtype: type
+) -> None:
+    path = tmp_path / "transform.npy"
+    transform = np.eye(4).astype(dtype)
+    np.save(path, transform)
+
+    np.testing.assert_array_equal(_load_transform(path, "test_transform"), transform)
 
 
 def test_quality_gate_rejects_large_residual() -> None:
