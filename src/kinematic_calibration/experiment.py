@@ -117,7 +117,7 @@ def _preflight_output(output: Path, force: bool) -> None:
 def _publish(stage: Path, output: Path, force: bool) -> None:
     """Publish a checked set, restoring previous files on ordinary I/O failures.
 
-    The manifest is installed last; interrupted processes leave a set that the
+    The manifest is installed last; a process crash can leave a set that the
     loader rejects. Unrelated files in an existing output directory are retained.
     """
     _preflight_output(output, force)
@@ -126,25 +126,28 @@ def _publish(stage: Path, output: Path, force: bool) -> None:
     backup = Path(
         tempfile.mkdtemp(prefix=f".{output.name}-previous-", dir=output.parent)
     )
-    moved, installed = [], []
+    backup_attempts, install_attempts = [], []
     try:
         for name in (*_DATA_FILES, _PLAN_FILE, "manifest.json"):
             destination = output / name
             if destination.exists():
+                # Track intent even if an interruption follows the actual move.
+                backup_attempts.append(name)
                 os.replace(destination, backup / name)
-                moved.append(name)
         data_files = (
             (*_DATA_FILES, _PLAN_FILE) if (stage / _PLAN_FILE).exists() else _DATA_FILES
         )
         for name in (*data_files, "manifest.json"):
+            install_attempts.append(name)
             os.replace(stage / name, output / name)
-            installed.append(name)
     except BaseException:
         try:
-            for name in reversed(installed):
-                (output / name).unlink()
-            for name in moved:
-                os.replace(backup / name, output / name)
+            for name in reversed(install_attempts):
+                (output / name).unlink(missing_ok=True)
+            for name in backup_attempts:
+                previous = backup / name
+                if previous.exists():
+                    os.replace(previous, output / name)
             if created:
                 output.rmdir()
         except BaseException as recovery_error:

@@ -231,21 +231,24 @@ def _publish(stage: Path, destinations: dict[str, Path], force: bool):
     """Publish the data/report pair and restore existing files after failures."""
     _preflight(tuple(destinations.values()), force)
     backup = Path(tempfile.mkdtemp(prefix=".captures-previous-", dir=stage.parent))
-    moved, installed = [], []
+    backup_attempts, install_attempts = [], []
     try:
         for name, destination in destinations.items():
             if destination.exists():
+                # Track intent even if an interruption follows the actual move.
+                backup_attempts.append(name)
                 os.replace(destination, backup / name)
-                moved.append(name)
         for name, destination in destinations.items():
+            install_attempts.append(name)
             os.replace(stage / name, destination)
-            installed.append(name)
     except BaseException:
         try:
-            for name in reversed(installed):
-                destinations[name].unlink()
-            for name in moved:
-                os.replace(backup / name, destinations[name])
+            for name in reversed(install_attempts):
+                destinations[name].unlink(missing_ok=True)
+            for name in backup_attempts:
+                previous = backup / name
+                if previous.exists():
+                    os.replace(previous, destinations[name])
         except BaseException as recovery_error:
             raise OSError(
                 f"capture rollback failed; previous files retained at {backup}"

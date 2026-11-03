@@ -100,6 +100,10 @@ kinematic-calib calibrate --backend numpy --calibration-type geometry \
 已有工件的可视化不会构造真值模型；相机坐标、固定外参和样本标签说明见
 [观测数据回放](docs/measured-playback.md)。
 
+求解和报告命令会拒绝输入/输出路径冲突，`--force` 不会跳过此检查。拟合参数与JSON报告
+均准备完成后才发布；普通写入失败或Python中断会恢复原配对。进程崩溃可能留下未完成的
+配对，读取时的哈希检查会拒绝它。
+
 完整迁移的 URDF 工作流使用可选 RTB 模型适配器：
 
 ```bash

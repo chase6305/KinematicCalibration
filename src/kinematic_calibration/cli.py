@@ -6,6 +6,7 @@ import math
 import sys
 import time
 from pathlib import Path
+from zipfile import BadZipFile
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -265,6 +266,9 @@ def main(argv=None) -> int:
             finally:
                 server.stop()
         return 0
+    except (EOFError, BadZipFile) as exc:
+        print(f"kincal: could not read input: {exc}", file=sys.stderr)
+        return 2
     except (ValueError, FileNotFoundError, FileExistsError, ImportError) as exc:
         print(f"kincal: {exc}", file=sys.stderr)
         return 2

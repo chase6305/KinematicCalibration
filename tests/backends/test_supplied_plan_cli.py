@@ -76,3 +76,34 @@ def test_candidate_generation_and_supplied_input_are_mutually_exclusive(tmp_path
         )
     assert error.value.code == 2
     assert not (tmp_path / "plan.npz").exists()
+
+
+@pytest.mark.parametrize(
+    "filename,payload",
+    [("empty.npy", b""), ("truncated.npz", b"PK\x03\x04"), ("text.npy", b"not numpy")],
+)
+def test_unreadable_input_reports_cli_error_and_preserves_previous_plan(
+    tmp_path, capsys, filename, payload
+):
+    source, output = tmp_path / filename, tmp_path / "plan.npz"
+    source.write_bytes(payload)
+    output.write_bytes(b"previous plan")
+    assert (
+        main(
+            [
+                "plan",
+                "--input-joints",
+                str(source),
+                "--output",
+                str(output),
+                "--force",
+            ]
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert "kincal:" in captured.err
+    assert "Traceback" not in captured.err
+    assert captured.out == ""
+    assert source.read_bytes() == payload
+    assert output.read_bytes() == b"previous plan"

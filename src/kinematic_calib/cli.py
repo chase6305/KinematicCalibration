@@ -26,8 +26,8 @@ from .dataset import (
 from .dataset import sample_sha256 as _dataset_sample_sha256
 from .io_utils import (
     atomic_save_npy,
-    atomic_savez_compressed,
     atomic_write_json,
+    atomic_write_pair,
     atomic_write_text,
 )
 from .quality import evaluate_solution_quality as _evaluate_solution_quality
@@ -229,6 +229,21 @@ def _refuse_existing_outputs(paths: Sequence[Path], force: bool, command: str) -
         )
 
 
+def _refuse_input_output_aliases(
+    inputs: Sequence[Path | None], outputs: Sequence[Path], command: str
+) -> None:
+    for source in inputs:
+        if source is None:
+            continue
+        for output in outputs:
+            if source.resolve() == output.resolve() or (
+                source.exists() and output.exists() and source.samefile(output)
+            ):
+                raise ValueError(
+                    f"{command} output conflicts with input: {output} aliases {source}"
+                )
+
+
 def _create_template(args: argparse.Namespace) -> int:
     if args.samples <= 0 or args.dof <= 0:
         raise ValueError("samples and dof must be positive")
@@ -243,6 +258,8 @@ def _create_template(args: argparse.Namespace) -> int:
 
 
 def _inspect(args: argparse.Namespace) -> int:
+    if args.output is not None:
+        _refuse_input_output_aliases((args.dataset,), (args.output,), "inspect")
     thresholds = (
         args.min_joint_span,
         args.min_translation_span,
@@ -535,6 +552,9 @@ def _upgrade_dataset(args: argparse.Namespace) -> int:
         raise ValueError("upgrade-dataset --manifest must use the .json extension")
     if args.dataset.resolve() == args.output.resolve():
         raise ValueError("upgrade-dataset refuses in-place replacement")
+    _refuse_input_output_aliases(
+        (args.dataset,), (args.output, args.manifest), "upgrade-dataset"
+    )
     existing = [str(path) for path in (args.output, args.manifest) if path.exists()]
     if existing and not args.force:
         raise ValueError(
@@ -581,9 +601,16 @@ def _solve(args: argparse.Namespace) -> int:
         raise ValueError("solve --max-iterations must be positive")
     if not np.isfinite(args.damping) or args.damping < 0.0:
         raise ValueError("solve --damping must be finite and non-negative")
-    _refuse_existing_outputs(
-        (args.output, args.output.with_suffix(".json")), args.force, "solve"
+    output_paths = (args.output, args.output.with_suffix(".json"))
+    for path in output_paths:
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ValueError(f"solve output is not a regular file: {path}")
+    _refuse_input_output_aliases(
+        (args.dataset, args.urdf, args.base_t_camera, args.ee_t_target),
+        output_paths,
+        "solve",
     )
+    _refuse_existing_outputs(output_paths, args.force, "solve")
     from spatialmath import SE3
 
     backend = getattr(args, "backend", "rtb")
@@ -751,7 +778,9 @@ def _solve(args: argparse.Namespace) -> int:
                 external_transform_hashes["ee_T_target_sha256"]
             ),
         )
-    atomic_savez_compressed(args.output, **output_fields)
+    parameter_buffer = io.BytesIO()
+    np.savez_compressed(parameter_buffer, **output_fields)
+    parameter_bytes = parameter_buffer.getvalue()
     summary_path = args.output.with_suffix(".json")
     summary = {
         "schema_version": 1,
@@ -795,7 +824,7 @@ def _solve(args: argparse.Namespace) -> int:
         "dataset_sha256": _sha256(args.dataset),
         "dataset_schema_version": source_dataset_schema_version,
         "urdf_sha256": _sha256(args.urdf),
-        "parameters_npz_sha256": _sha256(args.output),
+        "parameters_npz_sha256": hashlib.sha256(parameter_bytes).hexdigest(),
         "dataset_coverage": dataset_coverage,
     }
     if external_transform_hashes is not None:
@@ -864,7 +893,11 @@ def _solve(args: argparse.Namespace) -> int:
                 "for prediction/validation or select --backend rtb for URDF export."
             ),
         )
-    atomic_write_json(summary_path, _jsonable(summary))
+    summary_bytes = (
+        json.dumps(_jsonable(summary), indent=2, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    _refuse_existing_outputs(output_paths, args.force, "solve")
+    atomic_write_pair(args.output, parameter_bytes, summary_path, summary_bytes)
     LOGGER.info("Wrote calibration parameters: %s", args.output)
     LOGGER.info("Wrote calibration summary: %s", summary_path)
     if self_calibrating and not args.quiet:
@@ -904,6 +937,11 @@ def _solve(args: argparse.Namespace) -> int:
 def _zero_offset(args: argparse.Namespace) -> int:
     if args.output.suffix.lower() != ".json":
         raise ValueError("zero-offset --output must use the .json extension")
+    _refuse_input_output_aliases(
+        (args.dataset, args.urdf, args.base_t_camera, args.ee_t_target),
+        (args.output,),
+        "zero-offset",
+    )
     _validate_quality_threshold_args(args, "zero-offset")
     if not np.isfinite(args.max_offset_rad) or args.max_offset_rad <= 0.0:
         raise ValueError("--max-offset-rad must be a positive finite value")
@@ -1262,12 +1300,56 @@ def _calibrate(args: argparse.Namespace) -> int:
 
     if not args.urdf.is_file():
         raise ValueError(f"source URDF does not exist: {args.urdf}")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = args.output_dir / "calibration_manifest.json"
     final_result_path = args.output_dir / "final_result.json"
+    handeye_result = args.handeye_result or args.output_dir / "handeye_result.json"
+    base_t_camera_path = args.output_dir / "base_T_camera.npy"
+    ee_t_target_path = args.output_dir / "ee_T_target.npy"
+    geometry_parameters = args.output_dir / "geometry_parameters.npz"
+    geometry_result = geometry_parameters.with_suffix(".json")
+    zero_offset_result = args.output_dir / "zero_offsets.json"
+
+    possible_extrinsics = bool(
+        args.handeye_samples is not None
+        and not args.no_use_handeye_extrinsics
+        and not source_is_robot_body
+    )
+    output_paths = [manifest_path, final_result_path]
+    if args.calibration_type in {"geometry", "both"}:
+        output_paths.extend((geometry_parameters, geometry_result))
+        if backend == "rtb":
+            if possible_extrinsics:
+                export_suffixes = ("calibrated", "self_calibrated")
+            elif source_is_robot_body:
+                export_suffixes = ("calibrated",)
+            else:
+                export_suffixes = ("self_calibrated",)
+            output_paths.extend(
+                args.output_dir / f"{args.urdf.stem}_{suffix}.urdf"
+                for suffix in export_suffixes
+            )
+    if args.calibration_type in {"zero-offset", "both"}:
+        output_paths.append(zero_offset_result)
+    if possible_extrinsics:
+        output_paths.extend((base_t_camera_path, ee_t_target_path))
+    input_paths = (args.dataset, args.urdf, args.handeye_samples)
+    _refuse_input_output_aliases(input_paths, output_paths, "calibrate")
+    if args.handeye_samples is not None:
+        # This path can be reused or recomputed, but other stages must preserve it.
+        _refuse_input_output_aliases((handeye_result,), output_paths, "calibrate")
+        if args.force or not handeye_result.exists():
+            _refuse_input_output_aliases(
+                input_paths, (handeye_result,), "calibrate"
+            )
+            output_paths.append(handeye_result)
+    for index, output_path in enumerate(output_paths):
+        _refuse_input_output_aliases(
+            (output_path,), output_paths[index + 1 :], "calibrate"
+        )
     _refuse_existing_outputs(
         (manifest_path, final_result_path), args.force, "calibrate"
     )
+    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     def invoke(function, namespace):
         """Run one noisy legacy stage under the selected presentation policy."""
@@ -1280,13 +1362,6 @@ def _calibrate(args: argparse.Namespace) -> int:
                 return function(namespace)
         finally:
             logging.disable(previous_disable)
-
-    handeye_result = args.handeye_result or args.output_dir / "handeye_result.json"
-    base_t_camera_path = args.output_dir / "base_T_camera.npy"
-    ee_t_target_path = args.output_dir / "ee_T_target.npy"
-    geometry_parameters = args.output_dir / "geometry_parameters.npz"
-    geometry_result = geometry_parameters.with_suffix(".json")
-    zero_offset_result = args.output_dir / "zero_offsets.json"
 
     handeye = {
         "attempted": args.handeye_samples is not None,
@@ -1625,6 +1700,9 @@ def _calibrate(args: argparse.Namespace) -> int:
 
 
 def _export_urdf(args: argparse.Namespace) -> int:
+    _refuse_input_output_aliases(
+        (args.urdf, args.result), (args.output,), "export-urdf"
+    )
     from .urdf_export import export_calibrated_urdf
 
     report = export_calibrated_urdf(
@@ -2315,11 +2393,22 @@ def _validate_result(args: argparse.Namespace) -> int:
 
     if args.parameters.suffix.lower() != ".npz":
         raise ValueError("validate-result --parameters must use the .npz extension")
+    calibration_result_path = args.result or args.parameters.with_suffix(".json")
     if args.output is not None:
+        _refuse_input_output_aliases(
+            (
+                args.parameters,
+                args.dataset,
+                calibration_result_path,
+                args.base_t_camera,
+                args.ee_t_target,
+            ),
+            (args.output,),
+            "validate-result",
+        )
         if args.output.suffix.lower() != ".json":
             raise ValueError("validate-result --output must use the .json extension")
         _refuse_existing_outputs((args.output,), args.force, "validate-result")
-    calibration_result_path = args.result or args.parameters.with_suffix(".json")
     calibration_report = None
     if calibration_result_path.exists():
         if calibration_result_path.suffix.lower() != ".json":
@@ -2719,6 +2808,7 @@ def _compare_zero_offsets(args: argparse.Namespace) -> int:
         raise ValueError("compare-zero-offsets requires at least two --result files")
     if args.output.suffix.lower() != ".json":
         raise ValueError("compare-zero-offsets --output must use the .json extension")
+    _refuse_input_output_aliases(args.results, (args.output,), "compare-zero-offsets")
     _refuse_existing_outputs((args.output,), args.force, "compare-zero-offsets")
     if (
         not np.isfinite(args.max_between_run_std_rad)
@@ -2870,6 +2960,7 @@ def _compare_zero_offsets(args: argparse.Namespace) -> int:
 
 
 def _benchmark(args: argparse.Namespace) -> int:
+    _refuse_input_output_aliases((args.urdf,), (args.output,), "benchmark")
     try:
         import roboticstoolbox as rtb
 
@@ -2936,6 +3027,17 @@ def _benchmark(args: argparse.Namespace) -> int:
 
 
 def _validate_urdf_truth(args: argparse.Namespace) -> int:
+    _refuse_input_output_aliases(
+        (
+            args.dataset,
+            args.nominal_urdf,
+            args.calibrated_urdf,
+            args.ground_truth_urdf,
+            args.zero_offset_result,
+        ),
+        (args.output,),
+        "validate-urdf-truth",
+    )
     from .urdf_truth_validation import compare_urdf_fk_truth
 
     if args.output.suffix.lower() != ".json":
