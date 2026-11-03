@@ -740,6 +740,9 @@ def _solve(args: argparse.Namespace) -> int:
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    provenance = _runtime_provenance()
+    source_dataset_sha256 = _sha256(args.dataset)
+    source_urdf_sha256 = _sha256(args.urdf)
     output_fields = {
         "schema_version": np.asarray(1, dtype=np.int64),
         "backend": np.asarray(model.backend),
@@ -756,7 +759,7 @@ def _solve(args: argparse.Namespace) -> int:
         "observation_frame": np.asarray(dataset.observation_frame.value),
         "source_observation_frame": np.asarray(source_observation_frame),
         "termination_reason": np.asarray(result.termination_reason),
-        "source_dataset_sha256": np.asarray(_sha256(args.dataset)),
+        "source_dataset_sha256": np.asarray(source_dataset_sha256),
         "source_sample_sha256": source_sample_sha256,
         "source_sample_indices": np.asarray(dataset.sample_indices, dtype=np.int64),
         "source_dataset_schema_version": np.asarray(
@@ -764,8 +767,8 @@ def _solve(args: argparse.Namespace) -> int:
             if source_dataset_schema_version is None
             else str(source_dataset_schema_version)
         ),
-        "source_urdf_sha256": np.asarray(_sha256(args.urdf)),
-        "implementation_sha256": np.asarray(_implementation_sha256()),
+        "source_urdf_sha256": np.asarray(source_urdf_sha256),
+        "implementation_sha256": np.asarray(provenance["implementation_sha256"]),
     }
     if self_calibrating:
         camera_t_base = SE3(estimated_camera_t_base)
@@ -794,7 +797,7 @@ def _solve(args: argparse.Namespace) -> int:
     summary = {
         "schema_version": 1,
         "calibration_type": "kinematic-geometry",
-        "provenance": _runtime_provenance(),
+        "provenance": provenance,
         "backend": model.backend,
         "base_link": model.base_link,
         "joint_names": list(model.joint_names),
@@ -830,17 +833,15 @@ def _solve(args: argparse.Namespace) -> int:
         },
         "quality_failures": quality_failures,
         "dataset_quality_warnings": dataset_quality_warnings,
-        "dataset_sha256": _sha256(args.dataset),
+        "dataset_sha256": source_dataset_sha256,
         "dataset_schema_version": source_dataset_schema_version,
-        "urdf_sha256": _sha256(args.urdf),
+        "urdf_sha256": source_urdf_sha256,
         "parameters_npz_sha256": hashlib.sha256(parameter_bytes).hexdigest(),
         "dataset_coverage": dataset_coverage,
     }
     if external_transform_hashes is not None:
         summary.update(external_transform_hashes)
     if not self_calibrating and model.link_frames_available:
-        if external_transform_hashes is not None:
-            summary.update(external_transform_hashes)
         from .geometry_postprocess import postprocess_urdf_definitions
 
         raw_urdf_definitions = calibrator.get_urdf_xyzrpy(result)
