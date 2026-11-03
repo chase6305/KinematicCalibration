@@ -5,6 +5,7 @@ import sys
 
 import numpy as np
 import pytest
+from scipy.linalg import expm
 from scipy.spatial.transform import Rotation
 
 from kinematic_calib import KinematicDataset, ObservationFrame
@@ -65,6 +66,63 @@ def _solve_arguments(tmp_path, mode, *, base_link=None):
     return arguments
 
 
+def _independent_saved_errors(tmp_path, *, fixed_camera=False, parameters="fit.npz"):
+    dataset = KinematicDataset.load(tmp_path / "train.npz")
+    observed = dataset.observed_poses
+    if fixed_camera:
+        base_t_camera = np.load(tmp_path / "base_T_camera.npy")
+        ee_t_target = np.load(tmp_path / "ee_T_target.npy")
+        observed = base_t_camera @ observed @ np.linalg.inv(ee_t_target)
+    with np.load(tmp_path / parameters) as saved:
+        axes = saved["screw_axes"]
+        home = saved["zero_configuration_pose"]
+    predicted = []
+    for joints in dataset.joint_positions:
+        pose = np.eye(4)
+        for axis, angle in zip(axes, joints, strict=True):
+            # Saved space screws use [v,w]; construct the Lie algebra directly.
+            vx, vy, vz, wx, wy, wz = axis
+            generator = np.array(
+                [
+                    [0.0, -wz, wy, vx],
+                    [wz, 0.0, -wx, vy],
+                    [-wy, wx, 0.0, vz],
+                    [0.0, 0.0, 0.0, 0.0],
+                ]
+            )
+            pose = pose @ expm(angle * generator)
+        predicted.append(pose @ home)
+    predicted = np.asarray(predicted)
+    position = np.linalg.norm(observed[:, :3, 3] - predicted[:, :3, 3], axis=1)
+    relative_rotation = observed[:, :3, :3] @ predicted[:, :3, :3].transpose(0, 2, 1)
+    # Rotation vectors retain accuracy near zero, unlike arccos(trace).
+    orientation = Rotation.from_matrix(relative_rotation).magnitude()
+    return {
+        "position_error_mean_m": float(position.mean()),
+        "position_error_max_m": float(position.max()),
+        "orientation_error_mean_rad": float(orientation.mean()),
+        "orientation_error_max_rad": float(orientation.max()),
+    }
+
+
+def _noisy_data(tmp_path):
+    _data(tmp_path)
+    dataset = KinematicDataset.load(tmp_path / "train.npz")
+    rng = np.random.default_rng(981)
+    encoders = dataset.joint_positions + rng.normal(
+        0.0, 0.0002, dataset.joint_positions.shape
+    )
+    observed = dataset.observed_poses.copy()
+    observed[:, :3, 3] += rng.normal(0.0, 0.0005, (len(observed), 3))
+    observed[:, :3, :3] = (
+        Rotation.from_rotvec(rng.normal(0.0, 0.001, (len(observed), 3))).as_matrix()
+        @ observed[:, :3, :3]
+    )
+    KinematicDataset(
+        encoders, observed, dataset.observation_frame, dataset.sample_indices
+    ).save(tmp_path / "train.npz")
+
+
 @pytest.mark.parametrize(
     "mode,camera",
     [
@@ -91,6 +149,11 @@ def test_dataset_solve_verify_and_independent_validation_without_rtb(
     report = json.loads((tmp_path / "fit.json").read_text())
     assert report["backend"] == "numpy"
     assert report["accepted"]
+    expected = _independent_saved_errors(
+        tmp_path, fixed_camera=camera and mode == "robot-body"
+    )
+    for metric, value in expected.items():
+        assert report[metric] == pytest.approx(value, rel=1e-10, abs=1e-12)
     assert not report["full_urdf_export_supported"]
     assert not report["partial_urdf_export_supported"]
     assert report["urdf_joint_definitions"] is None
@@ -147,6 +210,68 @@ def test_dataset_solve_verify_and_independent_validation_without_rtb(
         == 2
     )
     assert not (tmp_path / "invalid.urdf").exists()
+
+
+@pytest.mark.parametrize(
+    "mode,camera",
+    [("robot-body", False), ("robot-body", True), ("self-calibrating", True)],
+)
+def test_one_iteration_report_describes_saved_parameters(tmp_path, mode, camera):
+    _data(tmp_path, camera=camera)
+    arguments = _solve_arguments(tmp_path, mode) + ["--max-iterations", "1"]
+    if camera and mode == "robot-body":
+        arguments += [
+            "--base-t-camera",
+            str(tmp_path / "base_T_camera.npy"),
+            "--ee-t-target",
+            str(tmp_path / "ee_T_target.npy"),
+        ]
+    assert main(arguments) == 1
+    report = json.loads((tmp_path / "fit.json").read_text())
+    assert not report["converged"]
+    assert not report["accepted"]
+    assert report["termination_reason"] == "max_iterations"
+    assert report["quality_failures"] == ["solver did not converge"]
+    expected = _independent_saved_errors(
+        tmp_path, fixed_camera=camera and mode == "robot-body"
+    )
+    for metric, value in expected.items():
+        assert report[metric] == pytest.approx(value, rel=1e-10, abs=1e-12)
+
+
+def test_converged_noisy_report_describes_saved_parameters(tmp_path):
+    _noisy_data(tmp_path)
+    assert main(_solve_arguments(tmp_path, "robot-body")) == 0
+    report = json.loads((tmp_path / "fit.json").read_text())
+    assert report["converged"] and report["full_rank"] and report["accepted"]
+    for metric, value in _independent_saved_errors(tmp_path).items():
+        assert report[metric] == pytest.approx(value, rel=1e-10, abs=1e-12)
+
+
+def test_position_threshold_uses_converged_saved_model(tmp_path):
+    _noisy_data(tmp_path)
+    arguments = _solve_arguments(tmp_path, "robot-body")
+    assert main(arguments) == 0
+    final_error = _independent_saved_errors(tmp_path)["position_error_max_m"]
+    # A relative 1e-6 margin is well above matrix-exponential roundoff.
+    threshold = final_error * (1.0 - 1e-6)
+    arguments[arguments.index("--output") + 1] = str(tmp_path / "constrained.npz")
+    status = main(arguments + ["--max-position-error", str(threshold)])
+    report = json.loads((tmp_path / "constrained.json").read_text())
+    assert report["converged"] and report["full_rank"]
+    assert not report["dataset_quality_warnings"]
+    assert report["condition_number"] < report["quality_thresholds"][
+        "max_condition_number"
+    ]
+    expected = _independent_saved_errors(tmp_path, parameters="constrained.npz")
+    assert expected["position_error_max_m"] > threshold
+    assert expected["orientation_error_max_rad"] < report["quality_thresholds"][
+        "max_orientation_error_rad"
+    ]
+    assert not report["accepted"]
+    assert status == 1
+    assert len(report["quality_failures"]) == 1
+    assert report["quality_failures"][0].startswith("maximum position error ")
 
 
 def test_numpy_can_fit_a_selected_subchain_in_its_explicit_base_frame(

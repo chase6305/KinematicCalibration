@@ -25,7 +25,7 @@ def _twist_matrix(axis: np.ndarray) -> np.ndarray:
 def validate_saved_poe_parameters(
     screw_axes: np.ndarray, zero_configuration_pose: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Validate and normalize a saved revolute space-frame POE model."""
+    """Validate a saved revolute space-frame POE model without normalization."""
     raw_axes, raw_pose = np.asarray(screw_axes), np.asarray(zero_configuration_pose)
     if raw_axes.dtype.kind not in "iuf" or raw_pose.dtype.kind not in "iuf":
         raise ValueError("saved POE parameters must contain real numeric values")

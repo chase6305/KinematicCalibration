@@ -599,6 +599,8 @@ def _solve(args: argparse.Namespace) -> int:
     _refuse_existing_outputs(output_paths, args.force, "solve")
     from spatialmath import SE3
 
+    from .validation import evaluate_saved_poe
+
     backend = getattr(args, "backend", "rtb")
     if backend == "numpy" and any(
         (
@@ -698,17 +700,25 @@ def _solve(args: argparse.Namespace) -> int:
     screw_axes = fit.screw_axes
     zero_pose = fit.zero_pose
     final_iteration = result.iteration_results[-1]
-    stats = final_iteration.get_statistics()
+    # Iteration statistics describe the pre-update linearization. Assess the
+    # final parameters that will be saved against their actual training poses.
+    training_metrics = evaluate_saved_poe(
+        screw_axes,
+        zero_pose.A,
+        fit.dataset.joint_positions,
+        fit.dataset.observed_poses,
+        sample_indices=fit.dataset.sample_indices,
+    )
     final_twist_error = final_iteration.post_update_twist_errors_norm
     if final_twist_error is None:
-        final_twist_error = stats["twist_errors_norm"]
-    full_rank = int(stats["matrix_rank"]) == int(final_iteration.N_PARAMS)
+        final_twist_error = final_iteration.pre_update_twist_errors_norm
+    full_rank = int(final_iteration.matrix_rank) == int(final_iteration.N_PARAMS)
     accepted, quality_failures = _evaluate_solution_quality(
         converged=bool(result.has_converged),
         full_rank=full_rank,
-        position_error_max_m=float(stats["position_errors_max"]),
-        orientation_error_max_rad=float(stats["orientation_errors_max"]),
-        condition_number=float(stats["condition_number"]),
+        position_error_max_m=training_metrics["position_error_max_m"],
+        orientation_error_max_rad=training_metrics["orientation_error_max_rad"],
+        condition_number=float(final_iteration.condition_number),
         max_position_error=args.max_position_error,
         max_orientation_error=args.max_orientation_error,
         max_condition_number=args.max_condition_number,
@@ -788,15 +798,15 @@ def _solve(args: argparse.Namespace) -> int:
         "termination_reason": result.termination_reason,
         "converged": bool(result.has_converged),
         "iterations": int(result.nb_iterations_executed),
-        "position_error_mean_m": float(stats["position_errors_mean"]),
-        "position_error_max_m": float(stats["position_errors_max"]),
-        "orientation_error_mean_rad": float(stats["orientation_errors_mean"]),
-        "orientation_error_max_rad": float(stats["orientation_errors_max"]),
+        "position_error_mean_m": training_metrics["position_error_mean_m"],
+        "position_error_max_m": training_metrics["position_error_max_m"],
+        "orientation_error_mean_rad": training_metrics["orientation_error_mean_rad"],
+        "orientation_error_max_rad": training_metrics["orientation_error_max_rad"],
         "final_twist_error_norm": float(final_twist_error),
-        "regressor_rank": int(stats["matrix_rank"]),
+        "regressor_rank": int(final_iteration.matrix_rank),
         "parameter_count": int(final_iteration.N_PARAMS),
         "full_rank": full_rank,
-        "condition_number": float(stats["condition_number"]),
+        "condition_number": float(final_iteration.condition_number),
         "accepted": accepted,
         "quality_thresholds": {
             "max_position_error_m": args.max_position_error,

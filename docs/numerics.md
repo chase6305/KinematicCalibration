@@ -54,6 +54,10 @@ c = (1 - theta/2 cot(theta/2)) / theta²
 `pre_update_objective_norm` / `post_update_objective_norm` 给出加权目标范数。
 未接受的回溯步骤恢复模型并记录 `step_size = 0`。
 
+公开 `IterationResult` 的端点误差与回归诊断描述更新前的线性化点。CLI几何报告的训练
+位置/姿态误差则从最终保存的POE参数重新计算，并用同一结果检查误差阈值；秩和条件数
+仍来自最后一次线性化。训练误差不替代 `validate-result` 的独立留出验证。
+
 `has_converged` 表示迭代目标变化已达到停止阈值，不能替代精度或数据质量验收。
 重复同一个关节配置，即使残差收敛，也无法确定完整模型。
 应同时检查 `matrix_rank`、`N_PARAMS`、`singular_values`、
