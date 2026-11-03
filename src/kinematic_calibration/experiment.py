@@ -20,7 +20,10 @@ from kinematic_calib.dataset import (
 )
 from kinematic_calib.io_utils import atomic_savez_compressed, atomic_write_json
 from kinematic_calib.service import FitOptions, fit_dataset
-from kinematic_calib.validation import validate_saved_poe_parameters
+from kinematic_calib.validation import (
+    predict_saved_poe,
+    validate_saved_poe_parameters,
+)
 
 from .backends.numpy import NumpyBackend
 from .simulation import MeasurementNoise, sample_measurements
@@ -64,8 +67,6 @@ def _poses(value, name: str) -> np.ndarray:
 
 def predict_poe(axes: np.ndarray, home: np.ndarray, joints: np.ndarray) -> np.ndarray:
     """Evaluate a validated space-frame POE model in linear/angular order."""
-    from spatialmath import SE3, Twist3
-
     axes, home = validate_saved_poe_parameters(axes, home)
     joints = np.asarray(joints, dtype=float)
     if (
@@ -75,13 +76,7 @@ def predict_poe(axes: np.ndarray, home: np.ndarray, joints: np.ndarray) -> np.nd
         or not np.isfinite(joints).all()
     ):
         raise ValueError("joints must be a finite, nonempty [N, DOF] array")
-    predictions = []
-    for q in joints:
-        pose = SE3()
-        for axis, value in zip(axes, q, strict=True):
-            pose *= Twist3(axis).exp(value)
-        predictions.append(pose.A @ home)
-    return np.asarray(predictions)
+    return predict_saved_poe(axes, home, joints)
 
 
 def pose_metrics(predicted: np.ndarray, observed: np.ndarray) -> dict:

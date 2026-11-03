@@ -54,6 +54,39 @@ def validate_saved_poe_parameters(
     return axes, zero_pose
 
 
+def predict_saved_poe(
+    screw_axes: np.ndarray,
+    zero_configuration_pose: np.ndarray,
+    joint_positions: np.ndarray,
+) -> np.ndarray:
+    """Predict poses from saved space-frame [v,w] POE parameters.
+
+    Joint positions must be finite real numeric values with nonempty shape
+    [N, DOF], in radians. Returned poses have shape [N, 4, 4], with translations
+    in metres. Output frames follow the saved model's reference and terminal
+    frames. Accepted model roundoff is retained without normalization.
+    General matrix exponentials keep prediction independent of optimizer FK.
+    """
+    axes, zero_pose = validate_saved_poe_parameters(screw_axes, zero_configuration_pose)
+    raw_joints = np.asarray(joint_positions)
+    if raw_joints.dtype.kind not in "iuf":
+        raise ValueError("joint_positions must contain real numeric values")
+    joints = np.asarray(raw_joints, dtype=float)
+    if (
+        joints.ndim != 2
+        or joints.shape[1] != len(axes)
+        or not len(joints)
+        or not np.isfinite(joints).all()
+    ):
+        raise ValueError("joint_positions must be a finite, nonempty [N, DOF] array")
+
+    generators = [_twist_matrix(axis) for axis in axes]
+    predicted_poses = np.repeat(np.eye(4)[None], len(joints), axis=0)
+    for generator, positions in zip(generators, joints.T, strict=True):
+        predicted_poses = predicted_poses @ expm(positions[:, None, None] * generator)
+    return predicted_poses @ zero_pose
+
+
 def evaluate_saved_poe(
     screw_axes: np.ndarray,
     zero_configuration_pose: np.ndarray,
@@ -77,12 +110,7 @@ def evaluate_saved_poe(
     )
     source_indices = dataset.sample_indices
 
-    generators = [_twist_matrix(axis) for axis in axes]
-    predicted_poses = np.repeat(np.eye(4)[None], len(joints), axis=0)
-    # General matrix exponentials keep this FK independent of the optimizer.
-    for generator, positions in zip(generators, joints.T, strict=True):
-        predicted_poses = predicted_poses @ expm(positions[:, None, None] * generator)
-    predicted_poses = predicted_poses @ zero_pose
+    predicted_poses = predict_saved_poe(axes, zero_pose, joints)
     # Retain the general inverse for accepted near-rigid home matrices, whose
     # small roundoff need not have an inverse equal to a rigid transpose.
     relative_poses = observed @ np.linalg.inv(predicted_poses)

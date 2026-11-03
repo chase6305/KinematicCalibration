@@ -6,9 +6,68 @@ from kinematic_calibration.backends import NumpyBackend
 from kinematic_calibration.experiment import (
     example_urdf,
     load_experiment,
+    predict_poe,
     run_experiment,
 )
 from kinematic_calibration.simulation import MeasurementNoise, sample_measurements
+
+
+@pytest.mark.parametrize(
+    "joints",
+    [
+        np.array([[False], [True]]),
+        np.array([["0.0"], ["0.25"]]),
+        np.array([[0], [0.25]], dtype=object),
+        [[0], [0.25]],
+    ],
+)
+def test_predict_poe_retains_keywords_and_convertible_joint_inputs(joints):
+    home = np.eye(4)
+    home[0, 3] = 0.7
+    angles = np.asarray(joints, dtype=float)[:, 0]
+    expected = np.repeat(np.eye(4)[None], len(angles), axis=0)
+    expected[:, 0, 0] = expected[:, 1, 1] = np.cos(angles)
+    expected[:, 1, 0] = np.sin(angles)
+    expected[:, 0, 1] = -np.sin(angles)
+    expected[:, 0, 3] = 0.7 * np.cos(angles)
+    expected[:, 1, 3] = 0.7 * np.sin(angles)
+
+    np.testing.assert_allclose(
+        predict_poe(axes=np.array([[0, 0, 0, 0, 0, 1.0]]), home=home, joints=joints),
+        expected,
+        atol=1e-15,
+        rtol=0,
+    )
+
+
+def test_predict_poe_retains_complex_array_coercion_and_complex_list_error():
+    axes = np.array([[0, 0, 0, 0, 0, 1.0]])
+    joints = np.array([[0.0 + 0.5j], [0.25 + 0.2j]])
+    with pytest.warns(np.ComplexWarning, match="Casting complex values to real"):
+        actual = predict_poe(axes=axes, home=np.eye(4), joints=joints)
+    np.testing.assert_array_equal(actual, predict_poe(axes, np.eye(4), joints.real))
+    with pytest.raises(TypeError, match="float.*complex"):
+        predict_poe(axes=axes, home=np.eye(4), joints=joints.tolist())
+
+
+@pytest.mark.parametrize(
+    "joints",
+    [0.0, np.zeros(2), np.zeros((1, 2)), np.empty((0, 1)), [[np.nan]], [[np.inf]]],
+)
+def test_predict_poe_retains_invalid_joint_shape_and_finiteness_error(joints):
+    with pytest.raises(
+        ValueError, match=r"^joints must be a finite, nonempty \[N, DOF\] array$"
+    ):
+        predict_poe(
+            axes=np.array([[0, 0, 0, 0, 0, 1.0]]), home=np.eye(4), joints=joints
+        )
+
+
+def test_predict_poe_checks_model_before_joint_conversion():
+    with pytest.raises(ValueError, match="unit angular"):
+        predict_poe(
+            axes=np.array([[0, 0, 0, 0, 0, 2.0]]), home=np.eye(4), joints=[["invalid"]]
+        )
 
 
 def test_noiseless_calibration_generalizes_to_unseen_joints(tmp_path):
