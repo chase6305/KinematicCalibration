@@ -20,7 +20,11 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--urdf", type=Path)
     demo.add_argument("--end-link", default="ee_link")
     demo.add_argument("--base-link")
-    demo.add_argument("--samples", type=int, default=100)
+    training = demo.add_mutually_exclusive_group()
+    training.add_argument("--samples", type=int, default=100)
+    training.add_argument(
+        "--plan", type=Path, help="Measure a saved pose plan in its visit order"
+    )
     demo.add_argument("--validation-samples", type=int, default=40)
     demo.add_argument("--seed", type=int, default=42)
     demo.add_argument("--position-noise-m", type=float, default=0.0001)
@@ -29,6 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--force", action="store_true")
     view = commands.add_parser("view", help="Replay an experiment in Viser")
     view.add_argument("experiment", type=Path)
+    view.add_argument(
+        "--split",
+        choices=("validation", "training"),
+        default="validation",
+        help="Recorded dataset to replay (default: independent validation)",
+    )
     view_fit = commands.add_parser(
         "view-fit", help="Replay recorded observations with fitted POE parameters"
     )
@@ -133,6 +143,7 @@ def main(argv=None) -> int:
                 end_link=args.end_link,
                 base_link=args.base_link,
                 samples=args.samples,
+                plan=args.plan,
                 validation_samples=args.validation_samples,
                 seed=args.seed,
                 noise=MeasurementNoise(
@@ -211,7 +222,9 @@ def main(argv=None) -> int:
             if args.command == "view":
                 from .backends.viser import create_viewer
 
-                server = create_viewer(args.experiment, host=args.host, port=args.port)
+                server = create_viewer(
+                    args.experiment, split=args.split, host=args.host, port=args.port
+                )
             else:
                 from .backends.viser import create_fitted_viewer
 

@@ -22,6 +22,9 @@ NumPy 后端读取指定 URDF 路径，忽略 mesh，不执行物理与碰撞计
 `planning.select_informative_poses` 负责模型信息量选姿；`routing.plan_visit_order` 仅消费关节
 配置并缩短访问距离，不依赖模型、传感器或求解器。`save_pose_plan` 编排两步，保留候选身份
 和选姿/访问索引映射。重排不改变所选姿态集合，因此不改变回归矩阵的秩与奇异值谱。
+`load_pose_plan` 检查归档身份与距离；实验按保存的访问顺序调用 `measure_configurations`。
+完整计划纳入实验manifest，候选ID通过计划映射保留，实验内训练/验证样本ID仍互不重叠。
+Viser显式选择训练或验证集，分别使用对应的观测、预测、指标及图像，不将训练误差称为验证。
 
 `saved_model.load_fitted_model` 读取现有参数NPZ、配套报告和URDF，检查配对关系；不启动CLI，
 也不重验缺少的原训练数据。`MeasuredPlayback` 将已有观测转换到拟合模型的显示坐标，

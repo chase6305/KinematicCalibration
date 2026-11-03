@@ -23,6 +23,26 @@ class PoseSelection:
     characteristic_length_m: float
 
 
+@dataclass(frozen=True)
+class PosePlan:
+    """Saved joint configurations in visit order, with their original identities.
+
+    ``visit_order`` maps each saved row to its selection-order row. Recover
+    selection order with ``planned_joint_positions[np.argsort(visit_order)]``.
+    Loading a plan establishes neither independent measurements nor motion safety.
+    """
+
+    planned_joint_positions: np.ndarray
+    candidate_indices: np.ndarray
+    selected_candidate_indices: np.ndarray
+    visit_order: np.ndarray
+    segment_distances_rad: np.ndarray
+    joint_names: tuple[str, ...]
+    joint_limits: np.ndarray
+    singular_values: np.ndarray
+    metadata: dict
+
+
 def _positive_scalar(value, name: str) -> float:
     raw = np.asarray(value)
     if raw.ndim != 0 or raw.dtype.kind not in "iuf":
@@ -31,6 +51,248 @@ def _positive_scalar(value, name: str) -> float:
     if not np.isfinite(result) or result <= 0:
         raise ValueError(f"{name} must be a finite positive real number")
     return result
+
+
+def load_pose_plan(
+    path: str | Path,
+    *,
+    backend: KinematicsBackend | None = None,
+    source_urdf_sha256: str | None = None,
+) -> PosePlan:
+    """Read a schema-2 plan without pickle and check its saved identities.
+
+    Rows retain their saved visit order. Optional model checks compare joint
+    columns, limits and exposed frame names; a supplied URDF hash must match.
+    Checks cover stored distances and diagnostics, without repeating selection,
+    route optimization, collision checking or the observation regressor.
+    """
+    import json
+
+    from kinematic_calib.dataset import validated_joint_names
+
+    from .routing import _configurations
+
+    keys = (
+        "planned_joint_positions",
+        "candidate_indices",
+        "selected_candidate_indices",
+        "visit_order",
+        "segment_distances_rad",
+        "joint_names",
+        "joint_limits",
+        "singular_values",
+        "metadata_json",
+    )
+    archive = np.load(path, allow_pickle=False)
+    if not isinstance(archive, np.lib.npyio.NpzFile):
+        raise ValueError("pose plan must be an NPZ archive")
+    with archive:
+        if not set(keys).issubset(archive.files):
+            raise ValueError("pose plan is missing required arrays")
+        arrays = {key: archive[key] for key in keys}
+    raw_metadata = arrays.pop("metadata_json")
+    if raw_metadata.shape != () or raw_metadata.dtype.kind != "U":
+        raise ValueError("pose plan metadata_json must be a scalar string")
+    metadata = json.loads(raw_metadata.item())
+    if (
+        not isinstance(metadata, dict)
+        or type(metadata.get("schema_version")) is not int
+        or metadata["schema_version"] != 2
+        or metadata.get("artifact_type") != "planned_joint_configurations"
+    ):
+        raise ValueError("unsupported pose plan schema or artifact type")
+
+    def integer(name, minimum=1):
+        value = metadata.get(name)
+        if type(value) is not int or value < minimum:
+            raise ValueError(f"pose plan {name} must be an integer >= {minimum}")
+        return value
+
+    positions = _configurations(
+        arrays["planned_joint_positions"], name="planned_joint_positions"
+    )
+    count, dof = positions.shape
+    if integer("selected_count") != count:
+        raise ValueError("pose plan selected_count does not match saved rows")
+    candidate_count = integer("candidate_count")
+    integer("seed", 0)
+    names = validated_joint_names(arrays["joint_names"], dof)
+    if metadata.get("joint_names") != list(names):
+        raise ValueError("pose plan metadata joint_names do not match saved columns")
+    limits = _configurations(
+        arrays["joint_limits"], name="joint_limits", shape=(dof, 2)
+    )
+    if np.any(limits[:, 0] >= limits[:, 1]):
+        raise ValueError("pose plan joint_limits must be ordered")
+    if np.any(positions < limits[:, 0]) or np.any(positions > limits[:, 1]):
+        raise ValueError("planned_joint_positions must respect joint limits")
+
+    for key, upper in (
+        ("candidate_indices", candidate_count),
+        ("selected_candidate_indices", candidate_count),
+        ("visit_order", count),
+    ):
+        values = arrays[key]
+        if (
+            values.dtype.kind not in "iu"
+            or values.shape != (count,)
+            or np.any(values < 0)
+            or np.any(values >= upper)
+            or len(np.unique(values)) != count
+        ):
+            raise ValueError(
+                f"pose plan {key} must contain unique in-range row indices"
+            )
+    visit_order = arrays["visit_order"]
+    if not np.array_equal(
+        arrays["candidate_indices"], arrays["selected_candidate_indices"][visit_order]
+    ):
+        raise ValueError("pose plan candidate_indices do not match visit_order")
+
+    for key in (
+        "measurements_acquired",
+        "collision_checked",
+        "visibility_checked",
+        "trajectory_generated",
+    ):
+        if metadata.get(key) is not False:
+            raise ValueError(f"pose plan {key} must be false")
+    for key in ("base_link", "end_link"):
+        if not isinstance(metadata.get(key), str) or not metadata[key].strip():
+            raise ValueError(f"pose plan {key} must be a nonempty string")
+    source_hash = metadata.get("source_urdf_sha256")
+    if (
+        not isinstance(source_hash, str)
+        or len(source_hash) != 64
+        or any(character not in "0123456789abcdef" for character in source_hash)
+    ):
+        raise ValueError("pose plan source_urdf_sha256 must be a SHA-256 hex digest")
+    if source_urdf_sha256 is not None and source_urdf_sha256 != source_hash:
+        raise ValueError("pose plan source URDF SHA-256 does not match model")
+    if backend is not None:
+        if (
+            backend.dof != dof
+            or validated_joint_names(backend.joint_names, dof) != names
+        ):
+            raise ValueError("pose plan joint_names or DOF do not match backend")
+        if not np.array_equal(backend.joint_limits, limits):
+            raise ValueError("pose plan joint_limits do not match backend")
+        for key in ("base_link", "end_link"):
+            if hasattr(backend, key) and getattr(backend, key) != metadata[key]:
+                raise ValueError(f"pose plan {key} does not match backend")
+
+    if metadata.get("distance_metric") != "euclidean_joint_angles_without_wrapping":
+        raise ValueError("unsupported pose plan distance_metric")
+    if (
+        not isinstance(metadata.get("visit_order_method"), str)
+        or not metadata["visit_order_method"].strip()
+    ):
+        raise ValueError("pose plan visit_order_method must be a nonempty string")
+    if type(metadata.get("return_to_start")) is not bool:
+        raise ValueError("pose plan return_to_start must be a boolean")
+    if "start_configuration_rad" not in metadata:
+        raise ValueError("pose plan is missing start_configuration_rad")
+    start = metadata["start_configuration_rad"]
+    closed = metadata["return_to_start"]
+    if start is None:
+        if closed:
+            raise ValueError("return_to_start requires start_configuration_rad")
+        if visit_order[0] != 0:
+            raise ValueError(
+                "pose plan without a start must visit selection row zero first"
+            )
+    else:
+        start = _configurations(start, name="start_configuration_rad", shape=(dof,))
+        if np.any(start < limits[:, 0]) or np.any(start > limits[:, 1]):
+            raise ValueError("start_configuration_rad must respect joint limits")
+
+    def segments(rows):
+        if start is not None:
+            rows = (
+                np.vstack([start, rows, start]) if closed else np.vstack([start, rows])
+            )
+        with np.errstate(over="ignore", invalid="ignore"):
+            result = np.hypot.reduce(np.diff(rows, axis=0), axis=1)
+        if not np.isfinite(result).all():
+            raise ValueError(
+                "pose plan joint-space distances exceed the finite numeric range"
+            )
+        return result
+
+    expected_segments = segments(positions)
+    distances = _configurations(
+        arrays["segment_distances_rad"],
+        name="segment_distances_rad",
+        shape=expected_segments.shape,
+    )
+    if np.any(distances < 0) or not np.allclose(
+        distances, expected_segments, rtol=1e-9, atol=1e-12
+    ):
+        raise ValueError("pose plan segment_distances_rad do not match saved rows")
+    for key, values in (
+        ("total_distance_rad", expected_segments),
+        ("selection_order_distance_rad", segments(positions[np.argsort(visit_order)])),
+    ):
+        value = metadata.get(key)
+        with np.errstate(over="ignore"):
+            expected = float(values.sum())
+        if (
+            type(value) not in (int, float)
+            or not np.isfinite(value)
+            or value < 0
+            or not np.isfinite(expected)
+            or not np.isclose(value, expected, rtol=1e-9, atol=1e-12)
+        ):
+            raise ValueError(f"pose plan {key} does not match saved rows")
+
+    parameter_count = integer("parameter_count")
+    if parameter_count != 4 * dof + 6:
+        raise ValueError("pose plan parameter_count does not match DOF")
+    singular_values = _configurations(
+        arrays["singular_values"],
+        name="singular_values",
+        shape=(min(6 * count, parameter_count),),
+    )
+    if np.any(singular_values < 0) or np.any(np.diff(singular_values) > 0):
+        raise ValueError("pose plan singular_values must be nonnegative and descending")
+    rank_tolerance = (
+        singular_values[0] * max(6 * count, parameter_count) * np.finfo(float).eps
+    )
+    rank = int(np.count_nonzero(singular_values > rank_tolerance))
+    full_rank = rank == parameter_count
+    if (
+        integer("regressor_rank", 0) != rank
+        or metadata.get("full_rank") is not full_rank
+    ):
+        raise ValueError("pose plan rank diagnostics do not match singular_values")
+    if "condition_number" not in metadata:
+        raise ValueError("pose plan is missing condition_number")
+    condition = metadata["condition_number"]
+    if full_rank:
+        if (
+            type(condition) not in (int, float)
+            or not np.isfinite(condition)
+            or not np.isclose(
+                condition, singular_values[0] / singular_values[-1], rtol=1e-9
+            )
+        ):
+            raise ValueError(
+                "pose plan condition_number does not match singular_values"
+            )
+    elif condition is not None:
+        raise ValueError("rank-deficient pose plan condition_number must be null")
+    _positive_scalar(metadata.get("characteristic_length_m"), "characteristic_length_m")
+    return PosePlan(
+        planned_joint_positions=positions,
+        candidate_indices=arrays["candidate_indices"],
+        selected_candidate_indices=arrays["selected_candidate_indices"],
+        visit_order=visit_order,
+        segment_distances_rad=distances,
+        joint_names=names,
+        joint_limits=limits,
+        singular_values=singular_values,
+        metadata=metadata,
+    )
 
 
 def select_informative_poses(

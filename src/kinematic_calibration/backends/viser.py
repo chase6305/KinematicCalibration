@@ -21,13 +21,21 @@ def _frame(scene, name: str, pose: np.ndarray, length: float = 0.08):
     )
 
 
-def create_viewer(experiment: Path | str, *, host: str = "127.0.0.1", port: int = 8080):
+def create_viewer(
+    experiment: Path | str,
+    *,
+    split: str = "validation",
+    host: str = "127.0.0.1",
+    port: int = 8080,
+):
     """Create a Viser server and return it; callers own its lifecycle.
 
     Robot skeletons come from URDF geometry. Calibrated endpoint predictions
     come from the fitted POE, so the overlay displays numerical model outputs.
     """
-    return _create_viewer(ExperimentPlayback(experiment), host=host, port=port)
+    return _create_viewer(
+        ExperimentPlayback(experiment, split=split), host=host, port=port
+    )
 
 
 def create_fitted_viewer(
@@ -67,6 +75,7 @@ def _create_viewer(playback, *, host: str, port: int):
     report, dataset, model = playback.report, playback.dataset, playback.model
     nominal = playback.nominal
     synthetic = "truth_predictions" in model
+    training = synthetic and playback.split == "training"
     image_experiment = (
         synthetic and report.get("experiment_type") == "image-kinematic-calibration"
     )
@@ -179,7 +188,9 @@ def _create_viewer(playback, *, host: str, port: int):
             summary += f"\n\n{report['display_note']}"
     server.gui.add_markdown(summary)
     slider = server.gui.add_slider(
-        "Validation pose" if synthetic else "Recorded pose",
+        ("Training pose" if training else "Validation pose")
+        if synthetic
+        else "Recorded pose",
         min=0,
         max=len(dataset.joint_positions) - 1,
         step=1,
@@ -209,14 +220,16 @@ def _create_viewer(playback, *, host: str, port: int):
         )
         board_handle = server.scene.add_mesh_trimesh("/target", board_mesh)
     preview = None
-    validation_frames = []
+    capture_frames = {}
     if image_experiment and report["measurement_model"] == "rendered-image-detection":
-        capture = playback.path / "captures/validation"
-        validation_frames = json.loads((capture / "manifest.json").read_text())[
-            "samples"
-        ]
+        capture = playback.path / "captures" / ("train" if training else "validation")
+        capture_frames = {
+            row["sample_id"]: row
+            for row in json.loads((capture / "manifest.json").read_text())["samples"]
+        }
         preview = server.gui.add_image(
-            np.zeros((32, 32, 3), dtype=np.uint8), label="Validation image"
+            np.zeros((32, 32, 3), dtype=np.uint8),
+            label="Training image" if training else "Validation image",
         )
 
     def update(_event=None):
@@ -259,7 +272,7 @@ def _create_viewer(playback, *, host: str, port: int):
                 preview.visible = not manual_mode.value
                 if preview.visible:
                     with Image.open(
-                        capture / validation_frames[index]["image"]
+                        capture / capture_frames[state.sample_index]["image"]
                     ) as frame:
                         preview.image = np.asarray(frame.convert("RGB"))
             if state.position_error_m is None or state.orientation_error_rad is None:
@@ -269,6 +282,9 @@ def _create_viewer(playback, *, host: str, port: int):
                     f"Model vs {state.error_reference}: **{state.position_error_m * 1000:.3f} mm**, "
                     f"**{np.rad2deg(state.orientation_error_rad):.4f}°**"
                 )
+                if training and "training_plan" in report and not manual_mode.value:
+                    candidate = report["training_plan"]["candidate_indices"][index]
+                    error.content += f"\n\nTraining row: {index} · Candidate: {candidate}"
 
     def change_mode(_event):
         with server.atomic():

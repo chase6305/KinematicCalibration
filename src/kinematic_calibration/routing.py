@@ -24,7 +24,11 @@ def _configurations(value, *, name, shape=None):
             raise ValueError(f"{name} must have shape {shape}")
     elif raw.ndim != 2 or min(raw.shape) == 0:
         raise ValueError(f"{name} must have non-empty shape [N, DOF]")
-    return raw.astype(float, copy=False)
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = raw.astype(float, copy=False)
+    if not np.isfinite(result).all():
+        raise ValueError(f"{name} must contain finite real joint values")
+    return result
 
 
 def _distance_matrix(configurations):

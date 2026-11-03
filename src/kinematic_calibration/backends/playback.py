@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from kinematic_calib.dataset import KinematicDataset
+
 from ..artifacts import load_experiment_bundle
 from .numpy import NumpyBackend
 
@@ -25,14 +27,20 @@ class PoseState:
 class ExperimentPlayback:
     """Read an experiment once, then replay samples or evaluate manual joints.
 
+    Validation is the default; training replay retains its own measurement
+    labels and metrics and does not constitute held-out validation.
     Manual configurations have no sensor observation. Their errors are measured
     against the synthetic truth model, and cannot extend held-out validation.
     """
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, split: str = "validation"):
+        if not isinstance(split, str) or split not in ("validation", "training"):
+            raise ValueError("split must be 'validation' or 'training'")
+
         from robotkinecal import SerialRobotKineCal
 
         self.path = Path(path)
+        self.split = split
         self.report, self.dataset, self.model = load_experiment_bundle(path)
         self.nominal = NumpyBackend.from_urdf(
             self.path / "nominal.urdf",
@@ -40,6 +48,50 @@ class ExperimentPlayback:
             base_link=self.report["base_link"],
         )
         self.truth = self.nominal.perturbed(seed=self.report["truth_seed"])
+        if split == "training":
+            from ..experiment import pose_metrics, predict_poe
+
+            # Verify the complete bundle before selecting archived training rows.
+            self.dataset = KinematicDataset.load(self.path / "train.npz")
+            self.model = self.model.copy()
+            self.report = self.report.copy()
+            joints = self.dataset.joint_positions
+            for name, (axes, home) in (
+                ("nominal", self.nominal.poe_parameters()),
+                ("truth", self.truth.poe_parameters()),
+                ("calibrated", (self.model["screw_axes"], self.model["home"])),
+            ):
+                self.model[f"{name}_predictions"] = predict_poe(axes, home, joints)
+            self.report["data_role"] = "training"
+            for key, predicted, observed in (
+                (
+                    "nominal_vs_measurements",
+                    self.model["nominal_predictions"],
+                    self.dataset.observed_poses,
+                ),
+                (
+                    "calibrated_vs_measurements",
+                    self.model["calibrated_predictions"],
+                    self.dataset.observed_poses,
+                ),
+                (
+                    "calibrated_vs_truth",
+                    self.model["calibrated_predictions"],
+                    self.model["truth_predictions"],
+                ),
+                (
+                    "nominal_vs_truth",
+                    self.model["nominal_predictions"],
+                    self.model["truth_predictions"],
+                ),
+                (
+                    "measurement_vs_truth",
+                    self.dataset.observed_poses,
+                    self.model["truth_predictions"],
+                ),
+            ):
+                if key in self.report:
+                    self.report[key] = pose_metrics(predicted, observed)
         self.fitted = SerialRobotKineCal.from_screw_axes(
             self.model["screw_axes"],
             self.model["home"],
@@ -69,6 +121,9 @@ class ExperimentPlayback:
         }
         measured = None if index is None else self.dataset.observed_poses[index].copy()
         reference = poses["truth"] if measured is None else measured
+        measurement_reference = (
+            "training measurement" if self.split == "training" else "held-out measurement"
+        )
         predicted = poses["calibrated"]
         return PoseState(
             q,
@@ -81,7 +136,7 @@ class ExperimentPlayback:
                     predicted[:3, :3].T @ reference[:3, :3]
                 ).magnitude()
             ),
-            "synthetic truth" if measured is None else "held-out measurement",
+            "synthetic truth" if measured is None else measurement_reference,
             None if index is None else int(self.dataset.sample_indices[index]),
         )
 
@@ -91,7 +146,7 @@ class ExperimentPlayback:
             or isinstance(index, (bool, np.bool_))
             or not 0 <= index < len(self.dataset.joint_positions)
         ):
-            raise ValueError("sample index must identify a validation dataset row")
+            raise ValueError(f"sample index must identify a {self.split} dataset row")
         return self._state(self.dataset.joint_positions[index], index=int(index))
 
     def manual(self, joint_positions) -> PoseState:

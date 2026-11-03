@@ -151,6 +151,11 @@ kincal plan --count 40 --candidates 400 --output outputs/pose-plan.npz
 # 指定六轴起始关节角，最后返回起点；角度单位为弧度
 kincal plan --count 40 --start-joints 0 0 0 0 0 0 --return-to-start \
   --output outputs/pose-plan-round-trip.npz
+
+# 按已保存的访问顺序，从独立扰动真值生成合成观测并拟合
+kincal demo --plan outputs/pose-plan-round-trip.npz --output outputs/planned-demo
+kincal view outputs/planned-demo --split training
+kincal view outputs/planned-demo  # 独立验证集
 ```
 
 采集 manifest 包含内参、畸变、板类型、关节顺序、关节/图像时间戳，以及图像路径或按
@@ -169,8 +174,11 @@ kincal plan --count 40 --start-joints 0 0 0 0 0 0 --return-to-start \
 指向原候选行，`selected_candidate_indices` 保留 D-optimal 选姿顺序，`visit_order` 是两者
 之间的排列。另存关节名称、限位、每段距离及元数据。起始配置和可选回程记录在元数据与
 距离中，不额外算作标定姿态。输出尚未做碰撞或相机可见性检查，也不生成带速度约束的轨迹。
+`demo --plan` 核对同一名义URDF、关节列、限位和坐标链，按计划的行顺序采样；
+不能同时使用 `--samples`。完整计划随实验归档，训练行号与候选ID映射保留。
+`view --split training` 显示训练姿态与训练误差，默认 `view` 继续显示独立验证集。
 完整的无 DexSim 示例见 [planned_calibration.py](examples/planned_calibration.py)：按计划顺序
-从独立扰动真值模型生成合成观测，再拟合并用另一批关节配置验证。
+生成观测、归档拟合结果，再用另一批关节配置验证；也可通过Viser回放归档目录。
 
 ## 验证与开发
 

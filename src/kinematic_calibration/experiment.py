@@ -26,7 +26,8 @@ from kinematic_calib.validation import (
 )
 
 from .backends.numpy import NumpyBackend
-from .simulation import MeasurementNoise, sample_measurements
+from .planning import load_pose_plan
+from .simulation import MeasurementNoise, measure_configurations, sample_measurements
 
 EXPERIMENT_SCHEMA_VERSION = 2
 _DATA_FILES = (
@@ -37,6 +38,7 @@ _DATA_FILES = (
     "metrics.json",
 )
 _ARTIFACTS = (*_DATA_FILES, "manifest.json")
+_PLAN_FILE = "plan.npz"
 _MAX_CONDITION_NUMBER = 1e8
 
 
@@ -100,7 +102,7 @@ def _preflight_output(output: Path, force: bool) -> None:
     if output.is_symlink() or (output.exists() and not output.is_dir()):
         raise ValueError("experiment output must be a directory, not a file or symlink")
     existing = []
-    for name in _ARTIFACTS:
+    for name in (*_ARTIFACTS, _PLAN_FILE):
         path = output / name
         if path.is_symlink() or (path.exists() and not path.is_file()):
             raise ValueError(f"reserved artifact path is not a regular file: {path}")
@@ -126,12 +128,15 @@ def _publish(stage: Path, output: Path, force: bool) -> None:
     )
     moved, installed = [], []
     try:
-        for name in _ARTIFACTS:
+        for name in (*_DATA_FILES, _PLAN_FILE, "manifest.json"):
             destination = output / name
             if destination.exists():
                 os.replace(destination, backup / name)
                 moved.append(name)
-        for name in _ARTIFACTS:
+        data_files = (
+            (*_DATA_FILES, _PLAN_FILE) if (stage / _PLAN_FILE).exists() else _DATA_FILES
+        )
+        for name in (*data_files, "manifest.json"):
             os.replace(stage / name, output / name)
             installed.append(name)
     except BaseException:
@@ -190,6 +195,7 @@ def run_experiment(
     end_link: str = "ee_link",
     base_link: str | None = None,
     samples: int = 100,
+    plan: Path | str | None = None,
     validation_samples: int = 40,
     seed: int = 42,
     noise: MeasurementNoise | None = None,
@@ -201,10 +207,13 @@ def run_experiment(
     Validation requires at least five poses. Numerical acceptance reports solver
     convergence and observability only; this synthetic experiment does not certify
     physical robot accuracy. Known output files are replaced only with ``force``.
+    With ``plan``, saved visit rows supply the training configurations and their
+    count replaces ``samples``; the solver's minimum sample count still applies.
     """
     from robotkinecal import SerialRobotKineCal
 
-    samples = _integer(samples, "samples")
+    if plan is None:
+        samples = _integer(samples, "samples")
     validation_samples = _integer(validation_samples, "validation_samples", 5)
     seed = _integer(seed, "seed", 0)
     max_iterations = _integer(max_iterations, "max_iterations")
@@ -217,11 +226,21 @@ def run_experiment(
     _preflight_output(output, force)
     model_path = Path(urdf) if urdf is not None else example_urdf()
     if model_path.resolve() in {
-        output.joinpath(name).resolve() for name in _ARTIFACTS if name != "nominal.urdf"
+        output.joinpath(name).resolve()
+        for name in (*_ARTIFACTS, _PLAN_FILE)
+        if name != "nominal.urdf"
     }:
         raise ValueError("source URDF conflicts with a reserved experiment output")
     source_bytes = model_path.read_bytes()
     source_hash = hashlib.sha256(source_bytes).hexdigest()
+    plan_bytes = None
+    if plan is not None:
+        plan_path = Path(plan)
+        if plan_path.resolve() in {
+            output.joinpath(name).resolve() for name in _ARTIFACTS
+        }:
+            raise ValueError("source plan conflicts with a reserved experiment output")
+        plan_bytes = plan_path.read_bytes()
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=f".{output.name}-", dir=output.parent
@@ -232,14 +251,57 @@ def run_experiment(
         nominal = NumpyBackend.from_urdf(
             stage / "nominal.urdf", end_link=end_link, base_link=base_link
         )
+        training_plan = None
+        if plan_bytes is not None:
+            (stage / _PLAN_FILE).write_bytes(plan_bytes)
+            training_plan = load_pose_plan(
+                stage / _PLAN_FILE,
+                backend=nominal,
+                source_urdf_sha256=source_hash,
+            )
+            samples = len(training_plan.planned_joint_positions)
         minimum = minimum_full_pose_samples(nominal.dof)
         if samples < minimum:
             raise ValueError(f"samples must be >= {minimum} for {nominal.dof} joints")
         truth = nominal.perturbed(seed=seed + 1)
-        train = sample_measurements(truth, count=samples, seed=seed, noise=noise)
+        train = (
+            sample_measurements(truth, count=samples, seed=seed, noise=noise)
+            if training_plan is None
+            else measure_configurations(
+                truth,
+                training_plan.planned_joint_positions,
+                seed=seed,
+                noise=noise,
+                sample_indices=np.arange(samples),
+            )
+        )
         raw_validation = sample_measurements(
             truth, count=validation_samples, seed=seed + 2, noise=noise
         )
+        if training_plan is not None:
+            training_rows = set(map(tuple, train.joint_positions))
+            if any(tuple(q) in training_rows for q in raw_validation.joint_positions):
+                # A plan may share the validation RNG seed. Keep held-out rows
+                # disjoint while leaving random-training experiments unchanged.
+                pool = sample_measurements(
+                    truth,
+                    count=validation_samples + samples,
+                    seed=seed + 2,
+                    noise=noise,
+                )
+                keep = np.asarray(
+                    [
+                        index
+                        for index, q in enumerate(pool.joint_positions)
+                        if tuple(q) not in training_rows
+                    ][:validation_samples]
+                )
+                raw_validation = KinematicDataset(
+                    pool.joint_positions[keep],
+                    pool.observed_poses[keep],
+                    pool.observation_frame,
+                    joint_names=pool.joint_names,
+                )
         validation = KinematicDataset(
             raw_validation.joint_positions,
             raw_validation.observed_poses,
@@ -312,6 +374,14 @@ def run_experiment(
             ),
             "calibrated_vs_truth": pose_metrics(fitted_predictions, truth_predictions),
         }
+        data_files = _DATA_FILES
+        if training_plan is not None:
+            report["training_plan"] = {
+                "artifact": _PLAN_FILE,
+                "sha256": _sha256(stage / _PLAN_FILE),
+                "candidate_indices": training_plan.candidate_indices.tolist(),
+            }
+            data_files = (*_DATA_FILES, _PLAN_FILE)
         train.save(stage / "train.npz")
         validation.save(stage / "validation.npz")
         truth_axes, truth_home = truth.poe_parameters()
@@ -339,7 +409,7 @@ def run_experiment(
             {
                 "schema_version": 1,
                 "artifact_type": "kinematic-calibration-experiment",
-                "files_sha256": {name: _sha256(stage / name) for name in _DATA_FILES},
+                "files_sha256": {name: _sha256(stage / name) for name in data_files},
             },
         )
         load_experiment(stage)
@@ -386,6 +456,10 @@ def load_experiment(path: Path | str) -> tuple[dict, KinematicDataset, dict]:
         file_path = path / name
         if not file_path.is_file() or file_path.is_symlink():
             raise ValueError(f"experiment is missing a regular {name} artifact")
+    plan_path = path / _PLAN_FILE
+    has_plan = plan_path.exists() or plan_path.is_symlink()
+    if has_plan and (not plan_path.is_file() or plan_path.is_symlink()):
+        raise ValueError(f"experiment is missing a regular {_PLAN_FILE} artifact")
     manifest = json.loads((path / "manifest.json").read_text())
     if (
         not isinstance(manifest, dict)
@@ -395,9 +469,10 @@ def load_experiment(path: Path | str) -> tuple[dict, KinematicDataset, dict]:
     ):
         raise ValueError("unsupported experiment manifest")
     hashes = manifest.get("files_sha256")
-    if not isinstance(hashes, dict) or set(hashes) != set(_DATA_FILES):
+    data_files = (*_DATA_FILES, _PLAN_FILE) if has_plan else _DATA_FILES
+    if not isinstance(hashes, dict) or set(hashes) != set(data_files):
         raise ValueError("manifest must identify every experiment artifact")
-    for name in _DATA_FILES:
+    for name in data_files:
         if hashes[name] != _sha256(path / name):
             raise ValueError(f"experiment artifact SHA-256 mismatch: {name}")
     report = json.loads((path / "metrics.json").read_text())
@@ -407,6 +482,21 @@ def load_experiment(path: Path | str) -> tuple[dict, KinematicDataset, dict]:
         or report["schema_version"] != EXPERIMENT_SCHEMA_VERSION
     ):
         raise ValueError("unsupported experiment schema; rerun schema-1 experiments")
+    if has_plan != ("training_plan" in report):
+        raise ValueError("training_plan metadata must match the optional plan artifact")
+    if has_plan:
+        plan_metadata = report["training_plan"]
+        if (
+            not isinstance(plan_metadata, dict)
+            or set(plan_metadata) != {"artifact", "sha256", "candidate_indices"}
+            or plan_metadata["artifact"] != _PLAN_FILE
+            or plan_metadata["sha256"] != hashes[_PLAN_FILE]
+            or not isinstance(plan_metadata["candidate_indices"], list)
+            or any(
+                type(index) is not int for index in plan_metadata["candidate_indices"]
+            )
+        ):
+            raise ValueError("training_plan metadata does not match the archived plan")
     if (
         report.get("backend") != "numpy"
         or report.get("measurement_model") != "synthetic_pose_sensor"
@@ -547,6 +637,23 @@ def load_experiment(path: Path | str) -> tuple[dict, KinematicDataset, dict]:
         base_link=report["base_link"],
         end_link=report["end_link"],
     )
+    if has_plan:
+        training_plan = load_pose_plan(
+            plan_path,
+            backend=nominal,
+            source_urdf_sha256=hashes["nominal.urdf"],
+        )
+        if not np.array_equal(
+            train.joint_positions, training_plan.planned_joint_positions
+        ):
+            raise ValueError("training joint rows do not match the archived pose plan")
+        if (
+            report["training_plan"]["candidate_indices"]
+            != training_plan.candidate_indices.tolist()
+        ):
+            raise ValueError(
+                "training_plan candidate_indices do not match the archived pose plan"
+            )
     expected_axes, expected_home = nominal.poe_parameters()
     revolute = np.asarray(
         [joint.kind == "revolute" for joint in nominal.joints if joint.kind != "fixed"]
