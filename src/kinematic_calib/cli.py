@@ -722,6 +722,7 @@ def _solve(args: argparse.Namespace) -> int:
         "schema_version": np.asarray(1, dtype=np.int64),
         "backend": np.asarray(model.backend),
         "base_link": np.asarray(model.base_link),
+        "ee_name": np.asarray(args.ee_name),
         "joint_names": np.asarray(model.joint_names),
         "joint_identity_verified": np.asarray(fit.joint_identity["verified"]),
         "parameter_type": np.asarray("kinematic-poe"),
@@ -1791,20 +1792,23 @@ def _verify_result(args: argparse.Namespace) -> int:
                     archive["source_observation_frame"].item()
                 ),
             }
-            for field in ("backend", "base_link"):
+            # Legacy schema-1 parameter archives did not bind the terminal link.
+            for field in ("backend", "base_link", "ee_name"):
                 if field in archive.files:
-                    if archive[field].shape != () or not isinstance(
-                        archive[field].item(), str
+                    if (
+                        archive[field].shape != ()
+                        or not isinstance(archive[field].item(), str)
+                        or not archive[field].item().strip()
                     ):
                         raise ValueError(
-                            f"parameter archive {field} must be a string scalar"
+                            f"parameter archive {field} must be a nonempty string scalar"
                         )
                     parameter_metadata[field] = archive[field].item()
                     if parameter_metadata[field] != report.get(field):
                         raise ValueError(
                             f"parameter archive {field} does not match result"
                         )
-                elif field in report:
+                elif field in report and field != "ee_name":
                     raise ValueError(f"parameter archive is missing result {field}")
             if "backend" in parameter_metadata and parameter_metadata[
                 "backend"
@@ -2484,9 +2488,15 @@ def _validate_result(args: argparse.Namespace) -> int:
             else None
         )
         model_context = {}
-        for field in ("backend", "base_link", "joint_names"):
+        for field in ("backend", "base_link", "ee_name", "joint_names"):
             if field in archive.files:
                 value = archive[field]
+                if field == "ee_name" and (
+                    value.shape != ()
+                    or value.dtype.kind != "U"
+                    or not value.item().strip()
+                ):
+                    raise ValueError("parameter ee_name must be a nonempty string scalar")
                 model_context[field] = (
                     value.tolist() if field == "joint_names" else value.item()
                 )

@@ -10,7 +10,7 @@ from scipy.spatial.transform import Rotation
 
 from kinematic_calib.cli import main
 from kinematic_calib.dataset import KinematicDataset, sample_sha256
-from kinematic_calib.saved_model import load_fitted_model
+from kinematic_calib.saved_model import FittedModel, load_fitted_model
 from kinematic_calibration.backends.numpy import NumpyBackend
 from kinematic_calibration.experiment import example_urdf
 from robotkinecal import SerialRobotKineCal
@@ -102,6 +102,11 @@ def test_actual_solve_model_and_source_fingerprints_survive_loading(
     ):
         monkeypatch.setitem(sys.modules, module, None)
     loaded = load_fitted_model(parameters, example_urdf())
+    with np.load(parameters, allow_pickle=False) as archive:
+        end_link = archive["ee_name"]
+        assert end_link.shape == () and end_link.dtype.kind == "U"
+        assert end_link.item() == loaded.report["ee_name"] == "ee_link"
+    assert loaded.end_link_identity_verified is True
     np.testing.assert_array_equal(loaded.source_sample_indices, source.sample_indices)
     np.testing.assert_array_equal(loaded.source_sample_sha256, sample_sha256(source))
     assert loaded.source_sample_indices.dtype == np.int64
@@ -127,6 +132,98 @@ def test_rejected_but_consistent_fit_remains_available_for_diagnosis(fitted, tmp
         fitted, tmp_path, lambda arrays, report: report.update(accepted=False)
     )
     assert load_fitted_model(parameters, example_urdf()).report["accepted"] is False
+
+
+@pytest.mark.parametrize("consumer", ["load", "verify-result", "validate-result"])
+@pytest.mark.parametrize(
+    "archived_end_link,reported_end_link",
+    [
+        pytest.param("ee_link", "Link6", id="different-fixed-tool"),
+        pytest.param(["ee_link"], "ee_link", id="terminal-array"),
+        pytest.param(123, 123, id="terminal-nonstring"),
+        pytest.param("", "", id="terminal-empty"),
+    ],
+)
+def test_terminal_identity_is_rejected_before_loading_the_chain(
+    fitted,
+    tmp_path,
+    monkeypatch,
+    caplog,
+    consumer,
+    archived_end_link,
+    reported_end_link,
+):
+    def change_report_endpoint(arrays, report):
+        arrays["ee_name"] = np.asarray(archived_end_link)
+        # ee_link and Link6 share active joints but differ by a fixed tool joint.
+        report["ee_name"] = reported_end_link
+
+    parameters = _edited_pair(fitted, tmp_path, change_report_endpoint)
+
+    def unexpected_chain(*args, **kwargs):
+        pytest.fail("mismatched terminal identity reached nominal chain construction")
+
+    monkeypatch.setattr(NumpyBackend, "from_urdf", unexpected_chain)
+    if consumer == "load":
+        with pytest.raises(ValueError, match="ee_name|end.link|terminal"):
+            load_fitted_model(parameters, example_urdf())
+    else:
+        arguments = [
+            consumer,
+            "--parameters",
+            str(parameters),
+            "--result",
+            str(parameters.with_suffix(".json")),
+            "--dataset",
+            str(fitted[0].parent / "train.npz"),
+        ]
+        if consumer == "verify-result":
+            arguments += ["--urdf", str(example_urdf())]
+            report = json.loads(parameters.with_suffix(".json").read_text())
+            if "base_T_camera_sha256" in report:
+                arguments += [
+                    "--base-t-camera",
+                    str(fitted[0].parent / "base_T_camera.npy"),
+                    "--ee-t-target",
+                    str(fitted[0].parent / "ee_T_target.npy"),
+                ]
+        assert main(arguments) == 2
+        assert "ee_name" in caplog.text
+
+
+def test_legacy_terminal_identity_remains_unverified(fitted, tmp_path):
+    parameters = _edited_pair(
+        fitted, tmp_path, lambda arrays, report: arrays.pop("ee_name", None)
+    )
+    loaded = load_fitted_model(parameters, example_urdf())
+    assert loaded.report["ee_name"] == "ee_link"
+    assert loaded.end_link_identity_verified is False
+    positional = FittedModel(
+        loaded.report,
+        loaded.screw_axes,
+        loaded.zero_pose,
+        loaded.source_sample_indices,
+        loaded.source_sample_sha256,
+        loaded.camera_t_base_initialization,
+        loaded.ee_t_target_initialization,
+    )
+    assert positional.end_link_identity_verified is False
+
+    from kinematic_calibration.backends.measured import MeasuredPlayback
+
+    options = {}
+    if "base_T_camera_sha256" in loaded.report:
+        options = {
+            "base_t_camera": fitted[0].parent / "base_T_camera.npy",
+            "ee_t_target": fitted[0].parent / "ee_T_target.npy",
+        }
+    playback = MeasuredPlayback(
+        parameters, fitted[0].parent / "train.npz", example_urdf(), **options
+    )
+    assert playback.report["replay_end_link_identity_verified"] is False
+    assert "Legacy fit" in playback.report["display_note"]
+    if loaded.report["model_mode"] == "self-calibrating":
+        assert "initialization" in playback.report["display_note"]
 
 
 @pytest.mark.parametrize(

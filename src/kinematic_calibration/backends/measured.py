@@ -145,6 +145,12 @@ class MeasuredPlayback:
             displayed = source
             coordinate_frame = "base"
 
+        if not fitted.end_link_identity_verified:
+            legacy_note = (
+                "Legacy fit: nominal end-link identity follows the report and is "
+                "not bound to the saved parameters."
+            )
+            note = f"{note} {legacy_note}" if note else legacy_note
         self.dataset = displayed
         self._fitted_axes = fitted.screw_axes
         self._fitted_home = fitted.zero_pose
@@ -167,6 +173,7 @@ class MeasuredPlayback:
             "coordinate_frame": coordinate_frame,
             "display_note": note,
             "replay_joint_identity_verified": identity["verified"],
+            "replay_end_link_identity_verified": fitted.end_link_identity_verified,
             "nominal_vs_measurements": _metrics(nominal, displayed.observed_poses),
             "calibrated_vs_measurements": _metrics(
                 calibrated, displayed.observed_poses

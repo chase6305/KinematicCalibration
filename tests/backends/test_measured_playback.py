@@ -122,6 +122,7 @@ def test_replay_matches_independent_frame_relationships_and_has_no_truth(
     )
     assert state.position_error_m < 2e-7
     assert playback.report["calibrated_vs_measurements"]["position_rmse_m"] < 2e-7
+    assert playback.report["replay_end_link_identity_verified"] is True
     assert playback.report["coordinate_frame"] == (
         "camera" if mode == "self-calibrating" else "base"
     )

@@ -28,6 +28,7 @@ class FittedModel:
     source_sample_sha256: np.ndarray
     camera_t_base_initialization: np.ndarray | None = None
     ee_t_target_initialization: np.ndarray | None = None
+    end_link_identity_verified: bool = False
 
 
 def _hash(value, name):
@@ -58,7 +59,8 @@ def load_fitted_model(
     Parameter bytes, the companion report and the supplied URDF are bound by
     hashes and cross-checked metadata. Source sample IDs and fingerprints are
     validated structurally; no source dataset or image is read or revalidated.
-    An internally consistent rejected fit can be loaded for diagnosis.
+    An internally consistent rejected fit can be loaded for diagnosis. Legacy
+    schema-1 archives without ``ee_name`` leave end-link identity unverified.
     """
     parameters_path, urdf_path = Path(parameters_path), Path(urdf_path)
     result_path = (
@@ -132,6 +134,9 @@ def load_fitted_model(
                 raise ValueError(
                     f"parameter {parameter_field} does not match the result"
                 )
+        end_link_verified = "ee_name" in archive.files
+        if end_link_verified and _string(archive, "ee_name") != report.get("ee_name"):
+            raise ValueError("parameter ee_name does not match the result")
         _hash(report["dataset_sha256"], "dataset_sha256")
         provenance = report.get("provenance")
         implementation_hash = _hash(
@@ -239,5 +244,11 @@ def load_fitted_model(
     if nominal.joint_names != names:
         raise ValueError("fitted joint names do not match the selected URDF chain")
     return FittedModel(
-        report, axes.copy(), zero_pose.copy(), indices, fingerprints, *initializations
+        report,
+        axes.copy(),
+        zero_pose.copy(),
+        indices,
+        fingerprints,
+        *initializations,
+        end_link_identity_verified=end_link_verified,
     )
