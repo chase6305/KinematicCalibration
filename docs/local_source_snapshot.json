@@ -1,0 +1,27 @@
+{
+  "snapshot_date": "2026-11-03",
+  "source": "auto_calibrate_sim working tree",
+  "git_head": "9488a2dbffc3e7635f3b0109a8839bd261a57cb0",
+  "working_tree_modified": true,
+  "note": "Imported user-authorized local working-tree implementation, including uncommitted changes. Hashes describe source files at import; destination files may be refactored.",
+  "files": {
+    "handeye_calib_sim/assets/A4-300_300_3.mtl": "b247706902992c73d68d690d38d5a9dfb935598b57ed42ae5298ab8378589d98",
+    "handeye_calib_sim/assets/A4-300_300_3.obj": "9272ab594d809c27ccdd3e355f913965147f427274be65dcf521fbd551bb4b84",
+    "handeye_calib_sim/assets/A4-300_300_3.png": "9355c44faeeab236793d4ceee4e7c9a769677342b90323460856ad12ab773c5c",
+    "handeye_calib_sim/assets/A4-300_300_3.svg": "7a24f54066b2f1bcd30038d22f95d998e7218c64645fc3f7ce77d35e337cfdf9",
+    "handeye_calib_sim/board.py": "4253faf73d0986eb7ac0270077158afb8e5f241f28d9448e3a6a955f81f2dbe4",
+    "handeye_calib_sim/opencv_cli.py": "3e02ae02c9bef4005b63883c8685bf5328a02029a0fc2efa989a4c4aadbf52b7",
+    "handeye_calib_sim/opencv_handeye.py": "919b3fef959bbd948a764a61800a60dac4aa77da36c7a649f3815a9506303bcd",
+    "handeye_calib_sim/sensor_noise.py": "5de1e20d21722e28ded7e448a2f432b8e92a5381fa8f0544300f05ead329438e",
+    "kinematic_calib/__init__.py": "e0f1b23e40d9e1ce011d8e4ec96eca216168a6a92d021f57a7783e38e8015cf3",
+    "kinematic_calib/benchmark.py": "ac4ba338181e9ce0841ea3d41fcffa64dd74ef92092d04925f741cffcff525a5",
+    "kinematic_calib/cli.py": "7a9b947acf5679aab6b6de767b142761cfb567c22598521f4abf8aaf9b4c259d",
+    "kinematic_calib/dataset.py": "86c1fb90d7acd81f6c6e913035739d6112fa27b20f9c678dea7883482b19ac47",
+    "kinematic_calib/geometry_postprocess.py": "c58241c7c623fed72d3da3072e9c1f0878320821ab0889fad1c82cfa4ee123b0",
+    "kinematic_calib/io_utils.py": "ee6caede48a363cb11874a30f91411c924c68f4485b1c4f0d93053fb6624059b",
+    "kinematic_calib/robot_model.py": "7902aaf4279ba84ef73b02f18e5ce0d46f1b8de924a8798f76f432cb51732de4",
+    "kinematic_calib/urdf_export.py": "9482716d7ed9526e7c9c76d5553e43d2aa08d42e0faf9c9c07ffae2cc11d252e",
+    "kinematic_calib/urdf_truth_validation.py": "8b41a4fa17966a7bdb1d1b80f59a9294bd3964fb883e348f4d8f04b84276352b",
+    "kinematic_calib/validation.py": "2b41b7b40982ee220a33820364801716e705aa7133903f5bc335c7c5b0ec3c2b"
+  }
+}

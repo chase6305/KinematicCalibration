@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "description": "Schema example with synthetic projected centers, not real robot measurements. Replace image_points with measured board.points-ordered pixels, or replace image_points and point_ids with image: images/frame-001.png. Use synchronized actual encoder readings; do not use nominal FK as pose observations.",
+  "observation_frame": "camera_T_target",
+  "camera_convention": "opencv-optical",
+  "joint_unit": "rad",
+  "translation_unit": "m",
+  "camera_matrix": [
+    [
+      800.0,
+      0.0,
+      320.0
+    ],
+    [
+      0.0,
+      820.0,
+      240.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "distortion": [
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "board_type": "cctag-multi",
+  "joint_names": [
+    "Joint1",
+    "Joint2",
+    "Joint3",
+    "Joint4",
+    "Joint5",
+    "Joint6"
+  ],
+  "samples": [
+    {
+      "sample_id": 1001,
+      "joint_positions": [
+        0.1,
+        -0.2,
+        0.3,
+        -0.4,
+        0.5,
+        -0.6
+      ],
+      "joint_timestamp_s": 1700000000.0,
+      "image_timestamp_s": 1700000000.005,
+      "point_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "image_points": [
+        [
+          328.88888889,
+          221.77777778
+        ],
+        [
+          442.61602468,
+          223.61810199
+        ],
+        [
+          383.91521051,
+          280.47663724
+        ],
+        [
+          495.18166325,
+          281.61853304
+        ],
+        [
+          325.77358624,
+          336.79353231
+        ],
+        [
+          437.17536733,
+          337.29145545
+        ]
+      ]
+    },
+    {
+      "sample_id": 1002,
+      "joint_positions": [
+        0.2,
+        -0.2,
+        0.3,
+        -0.4,
+        0.5,
+        -0.6
+      ],
+      "joint_timestamp_s": 1700000001.0,
+      "image_timestamp_s": 1700000001.005,
+      "point_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "image_points": [
+        [
+          345.80645161,
+          222.3655914
+        ],
+        [
+          455.716445,
+          224.14062623
+        ],
+        [
+          398.81859553,
+          279.19155922
+        ],
+        [
+          506.42701024,
+          280.31178262
+        ],
+        [
+          342.44563189,
+          333.73464429
+        ],
+        [
+          450.18240413,
+          334.25060643
+        ]
+      ]
+    }
+  ]
+}

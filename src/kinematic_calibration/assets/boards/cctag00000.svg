@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:ev="http://www.w3.org/2001/xml-events" xmlns:xlink="http://www.w3.org/1999/xlink" baseProfile="tiny" height="1100" version="1.2" width="1100">
+  <defs/>
+  <rect x="0" y="0" width="1100" height="1100" stroke="none" fill="white" />
+  <circle cx="550.0" cy="550.0" fill="black" r="500.0"/>
+  <circle cx="550.0" cy="550.0" fill="white" r="460.0"/>
+  <circle cx="550.0" cy="550.0" fill="black" r="420.0"/>
+  <circle cx="550.0" cy="550.0" fill="white" r="380.0"/>
+  <circle cx="550.0" cy="550.0" fill="black" r="340.0"/>
+  <circle cx="550.0" cy="550.0" fill="white" r="300.0"/>
+  <circle cx="550.0" cy="550.0" fill="black" r="260.0"/>
+  <circle cx="550.0" cy="550.0" fill="white" r="220.0"/>
+  <line stroke="gray" stroke-width="4" x1="535.0" x2="565.0" y1="550.0" y2="550.0"/>
+  <line stroke="gray" stroke-width="4" x1="550.0" x2="550.0" y1="535.0" y2="565.0"/>
+</svg>

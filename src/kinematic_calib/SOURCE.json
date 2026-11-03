@@ -1,0 +1,25 @@
+{
+  "source": "local auto_calibrate_sim/kinematic_calib working tree",
+  "base_commit": "9488a2dbffc3e7635f3b0109a8839bd261a57cb0",
+  "snapshot_date": "2026-11-03",
+  "working_tree_modified": true,
+  "files_sha256": {
+    "__init__.py": "e0f1b23e40d9e1ce011d8e4ec96eca216168a6a92d021f57a7783e38e8015cf3",
+    "benchmark.py": "ac4ba338181e9ce0841ea3d41fcffa64dd74ef92092d04925f741cffcff525a5",
+    "cli.py": "7a9b947acf5679aab6b6de767b142761cfb567c22598521f4abf8aaf9b4c259d",
+    "dataset.py": "86c1fb90d7acd81f6c6e913035739d6112fa27b20f9c678dea7883482b19ac47",
+    "geometry_postprocess.py": "c58241c7c623fed72d3da3072e9c1f0878320821ab0889fad1c82cfa4ee123b0",
+    "io_utils.py": "ee6caede48a363cb11874a30f91411c924c68f4485b1c4f0d93053fb6624059b",
+    "robot_model.py": "7902aaf4279ba84ef73b02f18e5ce0d46f1b8de924a8798f76f432cb51732de4",
+    "urdf_export.py": "9482716d7ed9526e7c9c76d5553e43d2aa08d42e0faf9c9c07ffae2cc11d252e",
+    "urdf_truth_validation.py": "8b41a4fa17966a7bdb1d1b80f59a9294bd3964fb883e348f4d8f04b84276352b",
+    "validation.py": "2b41b7b40982ee220a33820364801716e705aa7133903f5bc335c7c5b0ec3c2b"
+  },
+  "changes": [
+    "Separated argument definitions, shared quality criteria, and an in-memory fit service.",
+    "Replaced simulator resource paths with package assets and optional hand-eye adapter.",
+    "Kept dataset/solve/validation/export artifact compatibility.",
+    "Unified base_T_ee pipeline selection and kept exported models inside output directory.",
+    "Position validation uses Euclidean displacement independently of rotation residual."
+  ]
+}

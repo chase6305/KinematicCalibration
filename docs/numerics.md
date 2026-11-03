@@ -1,0 +1,71 @@
+# 数值约定与诊断
+
+## POE 模型与标定残差
+
+`SerialRobotKineCal.from_screw_axes(S, M)` 接受 `S.shape == (N, 6)`，
+每行为基坐标系中表达的零位螺旋轴 `[v_x,v_y,v_z,w_x,w_y,w_z]`。
+只支持转动关节，`||w|| = 1`、`v·w = 0`，且轴上点 `p` 对应
+`v = p × w`。零位末端变换 `M` 为 `Base_T_EE`，平移单位米，关节角单位弧度。
+
+正向运动学为
+
+```text
+Base_T_EE(q) = exp(S_1 q_1) ... exp(S_N q_N) M
+```
+
+完整姿态观测沿用上游 POE 伴随误差算法，其空间残差为
+
+```text
+y = log(Measured_Base_T_EE @ inv(Predicted_Base_T_EE))
+y = [linear_twist, angular_twist]
+```
+
+`position_weight` 和 `orientation_weight` 分别乘上述线性、角向 twist 的
+三个分量，最小化 `||W y||²`，因此数值权重在平方损失中也被平方。
+完整姿态的线性 twist **不是独立的欧氏端点位移**：大旋转误差会与平移耦合，
+权重也依赖基坐标原点的位置。只测位置时，残差才直接等于
+`measured_position - predicted_position`。不能用空间 twist 的线性部分直接
+声称毫米级位置精度；报告的 `position_errors` 和留出集验证使用实际端点
+欧氏距离，`orientation_errors` 使用相对旋转的最小旋转角。
+
+手眼外参不准确、位置观测与姿态观测互相冲突时，单纯调大 `position_weight`
+未必能满足期望的端点精度。应先检查变换方向、同步、外参和原始观测，
+并在独立验证集上检查实际位置和姿态误差。
+
+## 零角和接近 π 的稳定性
+
+旋转对数使用 SciPy 的旋转向量，以避免通过 `acos(trace(R)) / sin(theta)`
+计算时在 π 附近损失精度。由 `w = rotvec(R)` 得到线性部分：
+
+```text
+v = (I - [w]/2 + c [w]²) t
+c = (1 - theta/2 cot(theta/2)) / theta²
+```
+
+`theta` 很小时用 `c = 1/12 + theta²/720 + theta⁴/30240`。
+这里 `[w]` 是叉乘矩阵。测试独立使用 `scipy.linalg.expm` 计算 4×4
+李代数矩阵的指数，覆盖零角、接近 π、绕偏置点纯旋转及大平移。
+恰好 π 时旋转轴正负不唯一，判定依据为重建变换一致，而非轴符号。
+
+## 收敛、可辨识性与不确定度
+
+回溯、收敛、发散判断使用相同加权目标。
+`pre_update_twist_errors_norm` / `post_update_twist_errors_norm` 保留未加权范数；
+`pre_update_objective_norm` / `post_update_objective_norm` 给出加权目标范数。
+未接受的回溯步骤恢复模型并记录 `step_size = 0`。
+
+`has_converged` 表示迭代目标变化已达到停止阈值，不能替代精度或数据质量验收。
+重复同一个关节配置，即使残差收敛，也无法确定完整模型。
+应同时检查 `matrix_rank`、`N_PARAMS`、`singular_values`、
+`condition_number` 和留出集误差。姿态不充分、测点位于末关节轴上或
+联合估计未知外参时，都可能存在不可辨识自由度。
+
+当回归矩阵秩不足或残差自由度不足时，`joints_uncertainty` 为 `NaN`，
+表示无法可靠估计；伪逆在零空间中给出的零方差不能解释为高置信度。
+满秩情况下保留上游局部线性估计，它假设所用残差统计模型合理，
+不是实机精度保证。物理关节零位、几何误差、基座/工具外参间的规范自由度
+还需由工作流层选择约束及可导出的参数。
+
+只提供螺旋轴不能唯一确定 URDF 连杆坐标系，因此独立 POE 构造器
+不直接输出 URDF joint origin。需要通过提供该模型的 URDF 后端处理坐标系
+以及规范自由度，并验证导出前后 FK 一致。

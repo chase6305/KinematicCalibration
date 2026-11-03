@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+
+<svg width="300mm" height="240mm" viewBox="0 0 300 240" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" style="stroke:black; fill:none; stroke-width:0.5pt; stroke-linejoin:round; text-anchor:middle" font-family="Helvetica, Arial, FreeSans, Sans, sans, sans-serif">
+
+<g>
+
+<rect x="0" y="0" width="300.0" height="240.0" stroke="none" fill="black" />
+
+<circle cx="20.0" cy="20.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="40.0" cy="40.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="20.0" cy="60.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="40.0" cy="80.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="20.0" cy="100.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="40.0" cy="120.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="20.0" cy="140.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="40.0" cy="160.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="20.0" cy="180.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="40.0" cy="200.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="20.0" cy="220.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="60.0" cy="20.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="80.0" cy="40.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="60.0" cy="60.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="80.0" cy="80.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="60.0" cy="100.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="80.0" cy="120.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="60.0" cy="140.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="80.0" cy="160.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="60.0" cy="180.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="80.0" cy="200.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="60.0" cy="220.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="100.0" cy="20.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="120.0" cy="40.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="100.0" cy="60.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="120.0" cy="80.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="100.0" cy="100.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="120.0" cy="120.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="100.0" cy="140.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="120.0" cy="160.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="100.0" cy="180.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="120.0" cy="200.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="100.0" cy="220.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="140.0" cy="20.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="160.0" cy="40.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="140.0" cy="60.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="160.0" cy="80.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="140.0" cy="100.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="160.0" cy="120.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="140.0" cy="140.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="160.0" cy="160.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="140.0" cy="180.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="160.0" cy="200.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="140.0" cy="220.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="180.0" cy="20.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="200.0" cy="40.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="180.0" cy="60.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="200.0" cy="80.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="180.0" cy="100.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="200.0" cy="120.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="180.0" cy="140.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="200.0" cy="160.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="180.0" cy="180.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="200.0" cy="200.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="180.0" cy="220.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="220.0" cy="20.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="240.0" cy="40.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="220.0" cy="60.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="240.0" cy="80.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="220.0" cy="100.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="240.0" cy="120.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="220.0" cy="140.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="240.0" cy="160.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="220.0" cy="180.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="240.0" cy="200.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="220.0" cy="220.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="260.0" cy="20.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="280.0" cy="40.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="260.0" cy="60.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="280.0" cy="80.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="260.0" cy="100.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="280.0" cy="120.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="260.0" cy="140.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="280.0" cy="160.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="260.0" cy="180.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="280.0" cy="200.0" r="8.0" fill="white" stroke="none" />
+
+<circle cx="260.0" cy="220.0" r="8.0" fill="white" stroke="none" />
+
+</g>
+
+</svg>
