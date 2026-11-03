@@ -117,6 +117,39 @@ def test_camera_observation_conversion_preserves_body_fit():
     assert np.allclose(fit.dataset.observed_poses, _forward(axes, home, joints))
 
 
+def test_fit_service_accepts_independent_exponential_roundoff_without_normalizing():
+    from robotkinecal import SerialRobotKineCal
+
+    angular = np.array([0.2, 0.3, 0.7])
+    angular /= np.linalg.norm(angular)
+    axes = np.r_[np.cross([1.2, -0.9, 2.0], angular), angular][None]
+    home = np.eye(4)
+    joints = np.array([-2.5, -1.0, 0.0, 1.0, 2.5])[:, None]
+    observed = _forward(axes, home, joints)
+    original = observed.copy()
+    dataset = KinematicDataset(
+        joints, observed, ObservationFrame.BASE_T_EE, joint_names=("joint_1",)
+    )
+    calibrator = SerialRobotKineCal.from_screw_axes(
+        axes, home, joint_names=dataset.joint_names
+    )
+
+    fit = fit_dataset(dataset, calibrator, options=FitOptions(max_iterations=2))
+
+    np.testing.assert_array_equal(dataset.observed_poses, original)
+    np.testing.assert_array_equal(calibrator._observation_array, original)
+    assert not np.shares_memory(calibrator._observation_array, dataset.observed_poses)
+    held_out_joints = np.array([-2.0, -0.5, 0.5, 2.0])[:, None]
+    errors = evaluate_saved_poe(
+        fit.screw_axes,
+        fit.zero_pose.A,
+        held_out_joints,
+        _forward(axes, home, held_out_joints),
+    )
+    assert errors["position_error_max_m"] < 1e-10
+    assert errors["orientation_error_max_rad"] < 1e-10
+
+
 def test_unified_workflow_selects_body_mode_without_handeye(tmp_path, monkeypatch):
     """Direct pose datasets from headless engines need no extrinsic solve."""
     from kinematic_calib.cli import main

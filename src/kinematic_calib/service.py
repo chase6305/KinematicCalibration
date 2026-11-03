@@ -155,8 +155,7 @@ def fit_dataset(
         )
         initialize_composite_model(calibrator, camera_t_base, ee_t_target_estimate)
 
-    # Dataset construction already checks rigid transforms. Avoid rejecting
-    # valid near-pi rotations because of floating-point roundoff in composition.
+    # The core checks rigidity; this wrapper must not add a stricter SE3 check.
     observations = [SE3(pose, check=False) for pose in dataset.observed_poses]
     calibrator.set_observations(dataset.joint_positions, observations)
     solve_options = {

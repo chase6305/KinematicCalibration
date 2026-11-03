@@ -66,8 +66,8 @@ v3 资源来自固定 Toolkit commit 的 version-3 模板，包含独立的来�
 按 [原生构建说明](native-build.md) 完成安装后，在项目根目录运行：
 
 ```bash
-source outputs/native-pinned/build/Release/generators/conanrun.sh
-PYTHONPATH="$PWD/outputs/native-pinned/install/lib/python" \
+source outputs/native-toolkit/build/Release/generators/conanrun.sh
+PYTHONPATH="$PWD/outputs/native-toolkit/install/lib/python" \
   .venv/bin/python -m kinematic_calibration image-demo \
   --output outputs/cctag-v3-images --board cctag-multi-v3 \
   --detector-backend toolkit --samples 12 --validation-samples 6
@@ -77,7 +77,7 @@ PYTHONPATH="$PWD/outputs/native-pinned/install/lib/python" \
 这一链路的 optional-native 测试包含 PNG 解码/位姿恢复、CLI 拟合和归档重新检测：
 
 ```bash
-PYTHONPATH="$PWD/outputs/native-pinned/install/lib/python" \
+PYTHONPATH="$PWD/outputs/native-toolkit/install/lib/python" \
   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q \
   tests/image_simulation/test_native_image_experiment.py
 ```

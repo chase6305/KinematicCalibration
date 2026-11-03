@@ -5,9 +5,28 @@ import sys
 
 import numpy as np
 import pytest
+from scipy.linalg import expm
 from spatialmath import SE3, Twist3
 
 from robotkinecal import SerialRobotKineCal
+
+
+def _independent_roundoff_problem():
+    angular = np.array([0.2, 0.3, 0.7])
+    angular /= np.linalg.norm(angular)
+    axis = np.r_[np.cross([1.2, -0.9, 2.0], angular), angular]
+    vx, vy, vz, wx, wy, wz = axis
+    generator = np.array(
+        [
+            [0.0, -wz, wy, vx],
+            [wz, 0.0, -wx, vy],
+            [-wy, wx, 0.0, vz],
+            [0.0, 0.0, 0.0, 0.0],
+        ]
+    )
+    configurations = np.array([-2.5, -1.0, 0.0, 1.0, 2.5])[:, None]
+    poses = np.asarray([expm(q[0] * generator) for q in configurations])
+    return axis[None], generator, configurations, poses
 
 
 def make_problem(position_only=False):
@@ -108,6 +127,100 @@ def test_invalid_pose_observation_is_rejected():
     invalid[0, 3] = np.nan
     with pytest.raises(ValueError, match="finite"):
         calibrator.set_observations(configurations[:1], [SE3(invalid, check=False)])
+
+
+def test_independent_exponential_observations_preserve_float64_roundoff():
+    axes, _, configurations, poses = _independent_roundoff_problem()
+    original = poses.copy()
+    observations = [SE3(pose, check=False) for pose in poses]
+    calibrator = SerialRobotKineCal.from_screw_axes(axes, np.eye(4))
+
+    # General matrix exponentials can leave both rotation and homogeneous-row
+    # roundoff. These are independent FK observations, not scalar solver FK.
+    calibrator.set_observations(configurations, observations)
+
+    np.testing.assert_array_equal(calibrator._observation_array, original)
+    for observed, expected in zip(calibrator._observations, original, strict=True):
+        np.testing.assert_array_equal(observed.A, expected)
+        assert not np.shares_memory(observed.A, poses)
+    observations[0].A[0, 3] += 1.0
+    np.testing.assert_array_equal(calibrator._observation_array, original)
+    np.testing.assert_array_equal(calibrator._observations[0].A, original[0])
+    result = calibrator.solve(max_iterations=1)
+    assert np.all(np.isfinite(result.iteration_results[0].twist_errors))
+
+
+@pytest.mark.parametrize("as_se3", [False, True])
+def test_rounded_home_survives_snapshots_reset_and_result_copies(as_se3):
+    axes, generator, configurations, poses = _independent_roundoff_problem()
+    home = poses[0].copy()
+    # Reproducible accumulated float64 roundoff, comfortably inside 1e-12;
+    # neither rotations nor the homogeneous row should be silently normalized.
+    home[0, 0] += 4e-14
+    home[3, 1] += 2e-14
+    original_home = home.copy()
+    supplied_home = SE3(home, check=False) if as_se3 else home
+    calibrator = SerialRobotKineCal.from_screw_axes(axes, supplied_home)
+    np.testing.assert_array_equal(calibrator.zero_conf_EE_pose.A, original_home)
+    assert not np.shares_memory(
+        calibrator.zero_conf_EE_pose.A, supplied_home.A if as_se3 else home
+    )
+    home[0, 3] += 1.0
+    np.testing.assert_array_equal(calibrator.zero_conf_EE_pose.A, original_home)
+
+    snapshot = calibrator._model_snapshot()
+    np.testing.assert_array_equal(snapshot[1].A, original_home)
+    assert not np.shares_memory(snapshot[1].A, calibrator.zero_conf_EE_pose.A)
+    calibrator.zero_conf_EE_pose.A[0, 3] += 1.0
+    np.testing.assert_array_equal(snapshot[1].A, original_home)
+    calibrator._restore_model_snapshot(snapshot)
+    np.testing.assert_array_equal(calibrator.zero_conf_EE_pose.A, original_home)
+    snapshot[1].A[1, 3] += 1.0
+    np.testing.assert_array_equal(calibrator.zero_conf_EE_pose.A, original_home)
+    calibrator.zero_conf_EE_pose.A[0, 3] += 1.0
+    calibrator.reset()
+    np.testing.assert_array_equal(calibrator.zero_conf_EE_pose.A, original_home)
+
+    observations = [
+        SE3(expm(q[0] * generator) @ original_home, check=False)
+        for q in configurations
+    ]
+    calibrator.set_observations(configurations, observations)
+    result = calibrator.solve(max_iterations=1)
+    final_home = calibrator.zero_conf_EE_pose.A.copy()
+    _, result_home = calibrator.get_calibration(result)
+    np.testing.assert_array_equal(result_home.A, final_home)
+    assert not np.shares_memory(result_home.A, calibrator.zero_conf_EE_pose.A)
+    result_home.A[0, 3] += 1.0
+    np.testing.assert_array_equal(result.get_zero_conf_EE_pose().A, final_home)
+    calibrator.zero_conf_EE_pose.A[1, 3] += 1.0
+    calibrator.reset()
+    np.testing.assert_array_equal(calibrator.zero_conf_EE_pose.A, original_home)
+    np.testing.assert_array_equal(result.get_zero_conf_EE_pose().A, final_home)
+
+
+@pytest.mark.parametrize("route", ["home", "observation"])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ((0, 0), 1.0 + 1e-10),
+        ((0, 1), 1e-10),
+        ((0, 0), -1.0),
+        ((3, 0), 1e-10),
+        ((3, 3), 1.0 + 1e-10),
+    ],
+    ids=["scale", "shear", "reflection", "bottom-row", "bottom-scale"],
+)
+def test_rigid_pose_roundoff_tolerance_rejects_non_rigid_inputs(route, field, value):
+    axes = [[0.0, 0.0, 0.0, 0.0, 0.0, 1.0]]
+    invalid = np.eye(4)
+    invalid[field] = value
+    with pytest.raises(ValueError):
+        if route == "home":
+            SerialRobotKineCal.from_screw_axes(axes, invalid)
+        else:
+            calibrator = SerialRobotKineCal.from_screw_axes(axes, np.eye(4))
+            calibrator.set_observations([[0.0]], [SE3(invalid, check=False)])
 
 
 def test_screw_axis_model_urdf_export_has_clear_error():

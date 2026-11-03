@@ -24,6 +24,21 @@ def _real_array(value, name):
     return np.asarray(raw, dtype=float)
 
 
+def _rigid_pose(matrix):
+    """Check a finite 4x4 transform at float64 tolerance, preserving its values."""
+    rotation = matrix[:3, :3]
+    tolerance = 1e-12
+    with np.errstate(over="ignore", invalid="ignore"):
+        valid = (
+            np.max(np.abs(rotation.T @ rotation - np.eye(3))) <= tolerance
+            and abs(np.linalg.det(rotation) - 1.0) <= tolerance
+            and np.max(np.abs(matrix[3] - [0, 0, 0, 1])) <= tolerance
+        )
+    if not valid:
+        raise ValueError("matrix must be a rigid SE(3) transform")
+    return SE3(matrix.copy(), check=False)
+
+
 def _rank_from_singular_values(singular_values, matrix_shape):
     """Match NumPy's default numerical rank without factoring the matrix again."""
     tolerance = singular_values[0] * max(matrix_shape) * np.finfo(singular_values.dtype).eps
@@ -148,7 +163,7 @@ class CalibrationResult:
             """
             # Store a snapshot: the optimizer continues mutating its model after
             # this result has been created.
-            self.zero_conf_EE_pose = SE3(zero_conf_EE_pose.A.copy())
+            self.zero_conf_EE_pose = SE3(zero_conf_EE_pose.A.copy(), check=False)
             self.joint_screw_definitions = [
                 axis.copy() for axis in joint_screw_definitions
             ]
@@ -395,7 +410,7 @@ class CalibrationResult:
         A SE3 object defining the pose of the robot end-effector when all joint positions are zero.
         """
         result_from_last_iteration = self.iteration_results[-1]
-        return SE3(result_from_last_iteration.zero_conf_EE_pose.A.copy())
+        return SE3(result_from_last_iteration.zero_conf_EE_pose.A.copy(), check=False)
 
     def get_urdf_xyzrpy(self, zero_conf_joint_poses: list[SE3]):
         """
@@ -558,7 +573,7 @@ class SerialRobotKineCal:
             zero_pose = SE3(robot_model.base)
             for link in self.joints:
                 zero_pose *= link.A(0)
-                self.joint_zero_conf_poses.append(SE3(zero_pose.A.copy()))
+                self.joint_zero_conf_poses.append(SE3(zero_pose.A.copy(), check=False))
         else:
             # If the user has not specified the end effector link,
             # assume that the last link is the end effector.
@@ -701,7 +716,7 @@ class SerialRobotKineCal:
         if pose_array.shape != (4, 4) or not np.all(np.isfinite(pose_array)):
             raise ValueError("zero_conf_ee_pose must be a finite 4x4 SE(3) transform.")
         try:
-            home = SE3(pose_array.copy(), check=True)
+            home = _rigid_pose(pose_array)
         except ValueError as exc:
             raise ValueError(
                 "zero_conf_ee_pose must be a valid SE(3) transform."
@@ -789,7 +804,7 @@ class SerialRobotKineCal:
                         f"Pose observation {index} must be a finite single SE3 pose."
                     )
                 try:
-                    normalized_observations.append(SE3(matrix.copy(), check=True))
+                    normalized_observations.append(_rigid_pose(matrix))
                 except ValueError as exc:
                     raise ValueError(
                         f"Pose observation {index} is not a valid SE3 pose."
@@ -1117,10 +1132,12 @@ class SerialRobotKineCal:
         """Capture mutable calibration state for a recoverable trial update."""
         joint_poses = None
         if self.joint_zero_conf_poses is not None:
-            joint_poses = [SE3(pose.A.copy()) for pose in self.joint_zero_conf_poses]
+            joint_poses = [
+                SE3(pose.A.copy(), check=False) for pose in self.joint_zero_conf_poses
+            ]
         return (
             [axis.copy() for axis in self.joint_screw_axis],
-            SE3(self.zero_conf_EE_pose.A.copy()),
+            SE3(self.zero_conf_EE_pose.A.copy(), check=False),
             joint_poses,
         )
 
@@ -1128,11 +1145,11 @@ class SerialRobotKineCal:
         """Restore state captured by :meth:`_model_snapshot`."""
         screw_axes, zero_pose, joint_poses = snapshot
         self.joint_screw_axis = [axis.copy() for axis in screw_axes]
-        self.zero_conf_EE_pose = SE3(zero_pose.A.copy())
+        self.zero_conf_EE_pose = SE3(zero_pose.A.copy(), check=False)
         self.joint_zero_conf_poses = (
             None
             if joint_poses is None
-            else [SE3(pose.A.copy()) for pose in joint_poses]
+            else [SE3(pose.A.copy(), check=False) for pose in joint_poses]
         )
 
     def solve(

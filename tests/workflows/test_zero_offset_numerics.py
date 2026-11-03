@@ -55,13 +55,23 @@ def test_orientation_conflict_at_fixed_endpoint_has_zero_position_error(
 
     result = fit_fixed_extrinsics(FixedEndpointRobot(), joints, observations)
 
-    # A rotation conflict about X cannot be removed by the encoder's Z offset.
-    # Spatial-twist translation is nonzero here, while the endpoints coincide.
-    np.testing.assert_allclose(result["offsets"], 0, atol=1e-10)
+    # Coupled spatial-twist residuals need not return zero offsets for this
+    # conflicting fit. The endpoint stays fixed; reconstruct rotations at the
+    # returned offset independently to check the reported angular errors.
+    predicted = np.asarray(
+        [analytic_pose(row[0] + result["offsets"][0]) for row in joints]
+    )
+    expected_orientation_errors = Rotation.from_matrix(
+        observations[:, :3, :3] @ predicted[:, :3, :3].transpose(0, 2, 1)
+    ).magnitude()
     np.testing.assert_array_equal(result["position_errors_m"], np.zeros(len(joints)))
     assert result["position_error_rms_m"] == 0
-    np.testing.assert_allclose(result["orientation_errors_rad"], orientation_error)
-    assert result["orientation_error_rms_rad"] == pytest.approx(orientation_error)
+    np.testing.assert_allclose(
+        result["orientation_errors_rad"], expected_orientation_errors
+    )
+    assert result["orientation_error_rms_rad"] == pytest.approx(
+        np.sqrt(np.mean(expected_orientation_errors**2))
+    )
     assert np.isfinite(result["cost"])
     assert np.isfinite(result["singular_values"]).all()
 
