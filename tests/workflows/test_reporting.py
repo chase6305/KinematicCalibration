@@ -4,6 +4,7 @@ import copy
 import json
 
 import numpy as np
+import pytest
 
 from kinematic_calib.reporting import summarize_geometry
 
@@ -125,3 +126,57 @@ def test_identifiable_definitions_keep_their_metadata_and_missing_corrections(tm
     assert result["xyz_rpy"] == [[0.2, 0.3, 0.4, 0, 0, 0.1]]
     assert result["delta_xyz_rpy"] == [None]
     assert report == original
+
+
+@pytest.mark.parametrize(
+    "joint_names,expected_indices",
+    [(["shoulder", "elbow"], [0, 1, None]), (None, [2, 0, None])],
+    ids=["selected-encoder-order", "legacy-xml-order"],
+)
+def test_shuffled_joint_declarations_and_branch_preserve_index_namespace(
+    tmp_path, joint_names, expected_indices
+):
+    source = tmp_path / "robot.urdf"
+    source.write_text("""<robot name="test">
+    <link name="base"/><link name="upper"/><link name="forearm"/>
+    <link name="tool"/><link name="other"/>
+    <joint name="elbow" type="revolute">
+      <parent link="upper"/><child link="forearm"/><origin xyz="0.2 0 0"/>
+      <axis xyz="0 1 0"/><limit lower="-1" upper="1"/>
+    </joint>
+    <joint name="branch" type="continuous">
+      <parent link="base"/><child link="other"/><axis xyz="0 0 1"/>
+    </joint>
+    <joint name="shoulder" type="revolute">
+      <parent link="base"/><child link="upper"/>
+      <axis xyz="0 0 1"/><limit lower="-1" upper="1"/>
+    </joint>
+    <joint name="fixed" type="fixed">
+      <parent link="forearm"/><child link="tool"/><origin xyz="0.1 0 0"/>
+    </joint></robot>""")
+    report = {
+        "urdf_joint_definitions": [
+            {"name": "base-upper", "xyz": [0, 0, 0], "rpy": [0, 0, 0]},
+            {"name": "upper-forearm", "xyz": [0.2, 0, 0], "rpy": [0, 0, 0]},
+            {"name": "forearm-tool", "xyz": [0.1, 0, 0], "rpy": [0, 0, 0]},
+        ],
+    }
+    if joint_names is not None:
+        report["joint_names"] = joint_names
+
+    result = summarize_geometry(report, source, _stage())
+
+    assert result["joint_names"] == ["shoulder", "elbow", "fixed"]
+    assert result["joint_indices"] == expected_indices
+    if joint_names is not None:
+        identifiable = summarize_geometry(
+            {
+                "identifiable_urdf_joint_definitions": [
+                    {"joint_name": "elbow", "zero_based_index": 1}
+                ],
+            },
+            source,
+            _stage(),
+        )
+        assert identifiable["joint_names"] == ["elbow"]
+        assert identifiable["joint_indices"] == [result["joint_indices"][1]] == [1]

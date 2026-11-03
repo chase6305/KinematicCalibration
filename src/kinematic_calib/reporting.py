@@ -6,23 +6,37 @@ from pathlib import Path
 import numpy as np
 
 
-def _joint_metadata(source_urdf: Path | str) -> dict:
+def _joint_metadata(source_urdf: Path | str, joint_names=None) -> dict:
+    """Read URDF metadata using model-column indices when names are available."""
     metadata = {}
-    joint_index = 0
+    column_indices = (
+        None
+        if joint_names is None
+        else {name: index for index, name in enumerate(joint_names)}
+    )
+    xml_joint_index = 0
     for element in ET.parse(source_urdf).getroot().findall("joint"):
         parent, child = element.find("parent"), element.find("child")
         if parent is None or child is None:
             continue
         joint_type = element.get("type")
         rotating = joint_type in {"revolute", "continuous"}
+        joint_name = element.get("name")
+        column_index = None
+        if rotating:
+            column_index = (
+                xml_joint_index
+                if column_indices is None
+                else column_indices.get(joint_name)
+            )
         origin = element.find("origin")
         xyz = "0 0 0" if origin is None else origin.get("xyz", "0 0 0")
         rpy = "0 0 0" if origin is None else origin.get("rpy", "0 0 0")
         axis = element.find("axis")
         relation = f"{parent.get('link')}-{child.get('link')}"
         metadata[relation] = {
-            "zero_based_index": joint_index if rotating else None,
-            "joint_name": element.get("name"),
+            "zero_based_index": column_index,
+            "joint_name": joint_name,
             "joint_type": joint_type,
             "axis": (
                 np.fromstring(axis.get("xyz", "1 0 0"), sep=" ").tolist()
@@ -33,7 +47,7 @@ def _joint_metadata(source_urdf: Path | str) -> dict:
             "nominal_rpy": np.fromstring(rpy, sep=" "),
         }
         if rotating:
-            joint_index += 1
+            xml_joint_index += 1
     return metadata
 
 
@@ -46,7 +60,7 @@ def _joint_definitions(report: dict, source_urdf: Path | str) -> list:
 
     from scipy.spatial.transform import Rotation
 
-    metadata = _joint_metadata(source_urdf)
+    metadata = _joint_metadata(source_urdf, joint_names=report.get("joint_names"))
     normalized = []
     for definition in definitions:
         joint = metadata.get(definition["name"], {})
