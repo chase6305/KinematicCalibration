@@ -262,11 +262,13 @@ def _contaminated_problem(seed, fraction):
     random = np.random.default_rng(seed + 3)
     count = int(fraction * len(observed))
     corrupted = random.choice(len(observed), count, replace=False)
-    observed[corrupted, :3, 3] += random.normal(0, 0.03, (count, 3))
-    observed[corrupted, :3, :3] = (
-        observed[corrupted, :3, :3]
-        @ Rotation.from_rotvec(random.normal(0, 0.05, (count, 3))).as_matrix()
-    )
+    # SciPy 1.10 rejects empty rotation batches in the clean-data control.
+    if count:
+        observed[corrupted, :3, 3] += random.normal(0, 0.03, (count, 3))
+        observed[corrupted, :3, :3] = (
+            observed[corrupted, :3, :3]
+            @ Rotation.from_rotvec(random.normal(0, 0.05, (count, 3))).as_matrix()
+        )
     dataset = KinematicDataset(
         training.joint_positions,
         observed,

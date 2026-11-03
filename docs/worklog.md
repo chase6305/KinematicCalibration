@@ -308,3 +308,21 @@ Viser 已用真实 headless Chrome + software WebGL 检查过：骨架、纹理�
 
 持续优化仍在进行；声明的Viser1.0下限已复现API不兼容，正核实实际所需版本并补齐
 可视化初始化失败时的服务清理。
+
+## 第十五阶段：可视化版本与服务生命周期
+
+- 实际复现Viser1.0不支持世界坐标线宽，且 `get_port(0)` 无法返回真实端口；核实1.1.0
+  已具备所需API后，把两个可视化extra的下限修正为1.1，没有添加运行时版本分支。
+- 服务创建与场景填充分开，初始化失败或Python中断时关闭已启动的服务；两项实际TCP
+  回归先复现端口泄漏，再确认原异常继续抛出且端口关闭。
+- 启用固定原生扩展的源码全套 **1106 passed，2 optional RTB skipped**；Python3.11安装
+  wheel全套 **1102 passed，5 optional skipped**，Python3.12相关 **580 passed，1 skipped**。
+- Viser1.1.0 / OpenCV4.8 / Pillow10 / trimesh4的实际服务及清理 **16 passed**；相同视觉
+  环境的检测、采集与手眼 **145 passed，2 native skipped**。额外启用原生扩展后，对应
+  检测及图像实验 **19 passed，无跳过**；其动态库实际为OpenCV4.12，不与Python4.8混称。
+- 精确数值下限核心与服务 **126 passed**。仅调整旧SciPy不接受空旋转批次的零污染测试
+  fixture后，稳健拟合 **44 passed**；生产代码与wheel不变，原失败证据单独保留。
+- wheel/sdist、Ruff、空白及依赖检查通过；42模块指纹、58份测试快照和安装包导入路径
+  已核对，末次fixture修复另存新测试清单。所有服务均关闭，子模块保持 `2de5138a`。
+
+持续优化仍在进行；下一批核对保存报告是否准确描述最终拟合参数。

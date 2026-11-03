@@ -12,11 +12,11 @@ license-files = ["third_party/licenses/*.txt"]
 dependencies = ["numpy>=1.22,<2", "scipy>=1.10", "spatialmath-python>=1.1"]
 
 [project.optional-dependencies]
-visualization = ["viser>=1.0,<2", "trimesh>=4,<6", "pillow>=10"]
+visualization = ["viser>=1.1,<2", "trimesh>=4,<6", "pillow>=10"]
 vision = ["opencv-python-headless>=4.8,<4.12"]
 robotics = ["roboticstoolbox-python>=1.1"]
 dev = ["pytest>=8,<9", "ruff>=0.6", "build>=1"]
-all = ["viser>=1.0,<2", "trimesh>=4,<6", "pillow>=10", "opencv-python-headless>=4.8,<4.12", "roboticstoolbox-python>=1.1"]
+all = ["viser>=1.1,<2", "trimesh>=4,<6", "pillow>=10", "opencv-python-headless>=4.8,<4.12", "roboticstoolbox-python>=1.1"]
 
 [project.scripts]
 kincal = "kinematic_calibration.cli:main"

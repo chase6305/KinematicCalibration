@@ -64,7 +64,7 @@ def create_fitted_viewer(
 
 
 def _create_viewer(playback, *, host: str, port: int):
-    """Render either playback source; measured data has no truth or target mesh."""
+    """Own the server until setup succeeds; callers own the returned server."""
     try:
         import viser
     except ImportError as exc:
@@ -72,6 +72,17 @@ def _create_viewer(playback, *, host: str, port: int):
             "Viser is optional; install 'kinematic-calibration[visualization]'"
         ) from exc
 
+    server = viser.ViserServer(host=host, port=port, label="Kinematic Calibration")
+    try:
+        _populate_viewer(server, playback)
+    except BaseException:
+        server.stop()
+        raise
+    return server
+
+
+def _populate_viewer(server, playback):
+    """Render a playback source; recorded data has no truth or target mesh."""
     report, dataset, model = playback.report, playback.dataset, playback.model
     nominal = playback.nominal
     synthetic = "truth_predictions" in model
@@ -103,7 +114,6 @@ def _create_viewer(playback, *, host: str, port: int):
         ee_t_board = np.eye(4)
     coordinate_frame = report.get("coordinate_frame", "base")
     camera_coordinates = coordinate_frame == "camera"
-    server = viser.ViserServer(host=host, port=port, label="Kinematic Calibration")
     # OpenCV optical coordinates have Y down; robot-base coordinates have Z up.
     server.scene.set_up_direction("-y" if camera_coordinates else "+z")
     server.scene.add_grid(
@@ -308,4 +318,3 @@ def _create_viewer(playback, *, host: str, port: int):
     for joint in joint_sliders:
         joint.on_update(update)
     update()
-    return server

@@ -1,4 +1,5 @@
 import json
+import socket
 import urllib.request
 
 import numpy as np
@@ -16,6 +17,41 @@ def experiment(tmp_path_factory):
     path = tmp_path_factory.mktemp("viewer")
     run_experiment(path, samples=12, validation_samples=8)
     return path
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+def test_viewer_initialization_failure_closes_its_server(
+    experiment, monkeypatch, error_type
+):
+    servers = []
+    create_server = viser.ViserServer
+    failure = error_type("viewer scene initialization failed")
+
+    def record_server(*args, **kwargs):
+        server = create_server(*args, **kwargs)
+        servers.append((server, server.get_port()))
+        return server
+
+    def fail_scene(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(viser, "ViserServer", record_server)
+    monkeypatch.setattr(viser.SceneApi, "add_line_segments", fail_scene)
+    try:
+        with pytest.raises(error_type) as raised:
+            create_viewer(experiment, port=0)
+        assert raised.value is failure
+        assert len(servers) == 1
+        _, port = servers[0]
+        assert port > 0
+        with socket.socket() as connection:
+            connection.settimeout(1)
+            assert connection.connect_ex(("127.0.0.1", port)) != 0, (
+                "viewer initialization left its server listening"
+            )
+    finally:
+        for server, _ in servers:
+            server.stop()
 
 
 @pytest.fixture

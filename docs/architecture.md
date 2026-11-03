@@ -18,6 +18,8 @@
 `forward(q)` 和 `link_transforms(q)`。引擎的输出使用相同的米/弧度和 A_T_B 约定。
 NumPy 后端读取指定 URDF 路径，忽略 mesh，不执行物理与碰撞计算。Viser 是独立观察者，
 展示名义/真值骨架和标定后的端点预测；板贴在显示用真值 EE 坐标，未声称恢复全部关节框架。
+可视化依赖Viser1.1及以上，使用世界坐标线宽；初始化失败或被中断时关闭已启动的服务，
+成功返回后由调用者关闭。
 
 `planning.select_informative_poses` 负责模型信息量选姿；`routing.plan_visit_order` 仅消费关节
 配置并缩短访问距离，不依赖模型、传感器或求解器。`save_pose_plan` 编排两步，保留候选身份
