@@ -132,3 +132,14 @@ def test_opencv_backend_rejects_non_real_or_nonnumeric_pose_types(dtype):
     data = np.repeat(np.eye(4)[None], 4, axis=0).astype(dtype)
     with pytest.raises(ValueError, match="real numeric"):
         solve_opencv_eye_to_hand(data, data)
+
+
+def test_method_metadata_matches_opencv_enum():
+    import cv2
+
+    from kinematic_calibration.handeye.opencv import OPENCV_ROBOT_WORLD_METHODS
+
+    assert OPENCV_ROBOT_WORLD_METHODS == {
+        'shah': cv2.CALIB_ROBOT_WORLD_HAND_EYE_SHAH,
+        'li': cv2.CALIB_ROBOT_WORLD_HAND_EYE_LI,
+    }
