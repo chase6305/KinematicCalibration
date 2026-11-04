@@ -78,6 +78,9 @@ measured_ee_poses = camera_observations_to_base_ee(
 
 `opencv-handeye-calib` 保留 `auto_calibrate_sim` 的离线工作流，包含：
 
+基础安装可查看该命令及所有子命令的 `--help`。运动分析和求解需要 `vision` extra；
+未安装 OpenCV 时会给出安装提示。归档读取和闭环误差计算本身不加载 OpenCV。
+
 ```bash
 opencv-handeye-calib solve --samples handeye_observations.npz --output handeye.json
 opencv-handeye-calib verify --samples handeye_observations.npz --result handeye.json

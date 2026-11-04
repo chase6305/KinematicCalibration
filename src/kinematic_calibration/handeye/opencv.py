@@ -1,24 +1,36 @@
 """OpenCV robot-world/hand-eye solver ported from auto_calibrate_sim.
 
-This module is loaded only when the OpenCV backend is requested.
+OpenCV is loaded when its motion analysis or solver is used.
 """
 
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-import cv2 as cv
 import numpy as np
 
 from kinematic_calib import io_utils
 
+# OpenCV's RobotWorldHandEyeCalibrationMethod enum values; metadata needs no cv2.
 OPENCV_ROBOT_WORLD_METHODS = {
-    "shah": cv.CALIB_ROBOT_WORLD_HAND_EYE_SHAH,
-    "li": cv.CALIB_ROBOT_WORLD_HAND_EYE_LI,
+    "shah": 0,
+    "li": 1,
 }
 MIN_SECOND_ROTATION_SINGULAR_VALUE_RAD = 1e-3
 MIN_ROTATION_DIRECTION_RATIO = 1e-2
 MIN_ROTATION_SPAN_RAD = 1e-3
+
+
+def _require_opencv():
+    """Load the optional backend at its execution boundary."""
+    try:
+        import cv2 as cv
+    except ImportError as exc:
+        raise RuntimeError(
+            "OpenCV is unavailable; install kinematic-calibration[vision] "
+            f"in the active Python environment: {exc}"
+        ) from exc
+    return cv
 
 
 def opencv_calibration_implementation_sha256() -> str:
@@ -233,6 +245,7 @@ def evaluate_eye_to_hand_solution(
 
 def measure_handeye_motion(base_T_ee: np.ndarray) -> dict[str, float | int]:
     """Measure translational and rotational excitation of EE observations."""
+    cv = _require_opencv()
     poses = _validate_pose_batch("base_T_ee", base_T_ee)
     relative_rotation_vectors = []
     reference_rotation = poses[0, :3, :3]
@@ -268,6 +281,7 @@ def solve_opencv_eye_to_hand(
     method: str = "shah",
 ) -> OpenCVEyeToHandResult:
     """Solve ``Base_T_EE * EE_T_Board = Base_T_Camera * Camera_T_Board``."""
+    cv = _require_opencv()
     ee_poses = _validate_pose_batch("base_T_ee", base_T_ee)
     board_poses = _validate_pose_batch("camera_T_board", camera_T_board)
     if len(ee_poses) != len(board_poses):

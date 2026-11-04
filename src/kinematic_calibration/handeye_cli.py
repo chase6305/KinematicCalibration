@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Sequence
 from zipfile import BadZipFile
 
-import cv2 as cv
 import numpy as np
 
 from kinematic_calib.io_utils import (
@@ -24,6 +23,7 @@ from .handeye.opencv import (
     MIN_ROTATION_SPAN_RAD,
     MIN_SECOND_ROTATION_SINGULAR_VALUE_RAD,
     OPENCV_ROBOT_WORLD_METHODS,
+    _require_opencv,
     evaluate_eye_to_hand_solution,
     handeye_observations_sha256,
     load_opencv_observations,
@@ -255,7 +255,7 @@ def _solve(args: argparse.Namespace) -> int:
         "quality_failures": failures,
         "provenance": {
             "created_utc": datetime.now(timezone.utc).isoformat(),
-            "opencv_version": cv.__version__,
+            "opencv_version": _require_opencv().__version__,
             "numpy_version": np.__version__,
             "implementation_sha256": opencv_calibration_implementation_sha256(),
         },
@@ -577,7 +577,7 @@ def _compare(args: argparse.Namespace) -> int:
         "quality_failures": failures,
         "provenance": {
             "created_utc": datetime.now(timezone.utc).isoformat(),
-            "opencv_version": cv.__version__,
+            "opencv_version": _require_opencv().__version__,
             "numpy_version": np.__version__,
             "implementation_sha256": opencv_calibration_implementation_sha256(),
         },
@@ -747,7 +747,7 @@ def _influence(args: argparse.Namespace) -> int:
         ),
         "provenance": {
             "created_utc": datetime.now(timezone.utc).isoformat(),
-            "opencv_version": cv.__version__,
+            "opencv_version": _require_opencv().__version__,
             "numpy_version": np.__version__,
             "implementation_sha256": opencv_calibration_implementation_sha256(),
         },
@@ -854,7 +854,7 @@ def _bootstrap(args: argparse.Namespace) -> int:
         "failed_replicates": failed_replicates,
         "provenance": {
             "created_utc": datetime.now(timezone.utc).isoformat(),
-            "opencv_version": cv.__version__,
+            "opencv_version": _require_opencv().__version__,
             "numpy_version": np.__version__,
             "implementation_sha256": opencv_calibration_implementation_sha256(),
         },
