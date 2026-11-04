@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kinematic-calibration"
+version = "0.1.0"
+description = "Modular robot kinematic calibration with headless simulation and Viser"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license-files = ["third_party/licenses/*.txt"]
+dependencies = ["numpy>=1.22,<2", "scipy>=1.10", "spatialmath-python>=1.1"]
+
+[project.optional-dependencies]
+visualization = ["viser>=1.1,<2", "trimesh>=4,<6", "pillow>=10"]
+vision = ["opencv-python-headless>=4.8,<4.12"]
+robotics = ["roboticstoolbox-python>=1.1"]
+dev = ["pytest>=8,<9", "ruff>=0.6", "build>=1"]
+all = ["viser>=1.1,<2", "trimesh>=4,<6", "pillow>=10", "opencv-python-headless>=4.8,<4.12", "roboticstoolbox-python>=1.1"]
+
+[project.scripts]
+kincal = "kinematic_calibration.cli:main"
+kinematic-calib = "kinematic_calib.cli:main"
+opencv-handeye-calib = "kinematic_calibration.handeye_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+kinematic_calibration = ["assets/*", "assets/**/*"]
+robotkinecal = ["UPSTREAM.md"]
+kinematic_calib = ["SOURCE.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]

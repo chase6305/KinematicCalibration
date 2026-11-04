@@ -1,0 +1,30 @@
+name: Python calibration checks
+on: [push, pull_request]
+env:
+  OPENBLAS_NUM_THREADS: '1'
+  OMP_NUM_THREADS: '1'
+jobs:
+  headless:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e '.[dev,vision,visualization]'
+      - run: python -m pytest -q
+      - run: ruff check src tests scripts benchmarks
+      - run: python -m build
+      - run: kincal demo --samples 30 --validation-samples 12 --position-noise-m 0 --orientation-noise-rad 0 --output outputs/ci
+  robotics-adapter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -e '.[dev,robotics]'
+      - run: python -m pytest -q tests/core tests/workflows/test_kinematic_solver_optional.py

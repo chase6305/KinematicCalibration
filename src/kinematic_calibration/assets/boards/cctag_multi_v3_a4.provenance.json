@@ -1,0 +1,46 @@
+{
+  "source_repository": "https://github.com/chase6305/HandEyeCalibrationToolkit",
+  "source_commit": "2de5138a7467e5bdc80a3e1c50d59d50e80c4cf4",
+  "source_path": "assets/calibration_boards/cctag_multi_a4.svg",
+  "template_version": 3,
+  "svg_sha256": "55f541662cef0bdbbe4cb320204c11705c76e8b6a744375d5fb8844cf5c13435",
+  "png_sha256": "f67a5f81ee4a5e406a7f9fe726e0cc60f0322acfc2ecae122f9a3d28f639308e",
+  "rasterization": {
+    "library": "CairoSVG",
+    "version": "2.8.2",
+    "method": "svg2png(bytestring=svg_bytes, output_width=3600, output_height=3600)",
+    "width_px": 3600,
+    "height_px": 3600,
+    "pixels_per_mm": 12,
+    "runtime_dependency": false
+  },
+  "geometry": {
+    "width_m": 0.3,
+    "height_m": 0.3,
+    "origin_from_top_left_m": [
+      0.0525,
+      0.085
+    ],
+    "columns": 2,
+    "rows": 3,
+    "column_pitch_m": 0.13,
+    "physical_row_pitch_m": 0.065,
+    "native_detector_spacing_m": [
+      0.13,
+      0.13
+    ],
+    "marker_ids": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "marker_order": "row-major",
+    "crowns": 3,
+    "outer_diameter_m": 0.084,
+    "minimum_ring_width_m": 0.0042
+  },
+  "mesh": "300mm square/1mm thick; centered frame copied from the legacy planar OBJ with a distinct v3 material and texture"
+}

@@ -1,0 +1,3 @@
+[submodule "third_party/HandEyeCalibrationToolkit"]
+	path = third_party/HandEyeCalibrationToolkit
+	url = https://github.com/chase6305/HandEyeCalibrationToolkit.git

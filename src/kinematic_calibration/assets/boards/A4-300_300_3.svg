@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:ev="http://www.w3.org/2001/xml-events" xmlns:xlink="http://www.w3.org/1999/xlink" baseProfile="tiny" height="300mm" version="1.2" width="300mm">
+  <defs/>
+  <rect fill="white" height="100%" width="100%" x="0" y="0"/>
+  <circle cx="118.25mm" cy="290mm" fill="none" r="2.75mm" stroke="black" stroke-width="2"/>
+  <circle cx="138.25mm" cy="290mm" fill="none" r="2.75mm" stroke="black" stroke-width="2"/>
+  <circle cx="158.25mm" cy="290mm" fill="none" r="2.75mm" stroke="black" stroke-width="2"/>
+  <circle cx="178.25mm" cy="290mm" fill="none" r="2.75mm" stroke="black" stroke-width="2"/>
+  <circle cx="118.25mm" cy="250mm" fill="none" r="2.75mm" stroke="black" stroke-width="2"/>
+  <circle cx="138.25mm" cy="250mm" fill="none" r="2.75mm" stroke="black" stroke-width="2"/>
+  <circle cx="158.25mm" cy="250mm" fill="none" r="2.75mm" stroke="black" stroke-width="2"/>
+  <circle cx="178.25mm" cy="250mm" fill="none" r="2.75mm" stroke="black" stroke-width="2"/>
+  <circle cx="52mm" cy="52mm" fill="black" r="42mm" stroke="black"/>
+  <circle cx="52mm" cy="52mm" fill="white" r="37.8mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="52mm" cy="52mm" fill="black" r="33.6mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="52mm" cy="52mm" fill="white" r="29.4mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="52mm" cy="52mm" fill="black" r="25.2mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="52mm" cy="52mm" fill="white" r="21.0mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <line stroke="gray" x1="47.8mm" x2="56.2mm" y1="52mm" y2="52mm"/>
+  <line stroke="gray" x1="52mm" x2="52mm" y1="47.8mm" y2="56.2mm"/>
+  <circle cx="182mm" cy="52mm" fill="black" r="42mm" stroke="black"/>
+  <circle cx="182mm" cy="52mm" fill="white" r="37.8mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="182mm" cy="52mm" fill="black" r="33.6mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="182mm" cy="52mm" fill="white" r="29.4mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="182mm" cy="52mm" fill="black" r="25.2mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="182mm" cy="52mm" fill="white" r="18.9mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <line stroke="gray" x1="177.8mm" x2="186.2mm" y1="52mm" y2="52mm"/>
+  <line stroke="gray" x1="182mm" x2="182mm" y1="47.8mm" y2="56.2mm"/>
+  <circle cx="117mm" cy="117mm" fill="black" r="42mm" stroke="black"/>
+  <circle cx="117mm" cy="117mm" fill="white" r="37.8mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="117mm" cy="117mm" fill="black" r="33.6mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="117mm" cy="117mm" fill="white" r="29.4mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="117mm" cy="117mm" fill="black" r="23.099999999999998mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="117mm" cy="117mm" fill="white" r="18.9mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <line stroke="gray" x1="112.8mm" x2="121.2mm" y1="117mm" y2="117mm"/>
+  <line stroke="gray" x1="117mm" x2="117mm" y1="112.8mm" y2="121.2mm"/>
+  <circle cx="247mm" cy="117mm" fill="black" r="42mm" stroke="black"/>
+  <circle cx="247mm" cy="117mm" fill="white" r="37.8mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="247mm" cy="117mm" fill="black" r="33.6mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="247mm" cy="117mm" fill="white" r="29.4mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="247mm" cy="117mm" fill="black" r="23.099999999999998mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="247mm" cy="117mm" fill="white" r="16.8mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <line stroke="gray" x1="242.8mm" x2="251.2mm" y1="117mm" y2="117mm"/>
+  <line stroke="gray" x1="247mm" x2="247mm" y1="112.8mm" y2="121.2mm"/>
+  <circle cx="52mm" cy="182mm" fill="black" r="42mm" stroke="black"/>
+  <circle cx="52mm" cy="182mm" fill="white" r="37.8mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="52mm" cy="182mm" fill="black" r="33.6mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="52mm" cy="182mm" fill="white" r="27.3mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="52mm" cy="182mm" fill="black" r="23.099999999999998mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="52mm" cy="182mm" fill="white" r="18.9mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <line stroke="gray" x1="47.8mm" x2="56.2mm" y1="182mm" y2="182mm"/>
+  <line stroke="gray" x1="52mm" x2="52mm" y1="177.8mm" y2="186.2mm"/>
+  <circle cx="182mm" cy="182mm" fill="black" r="42mm" stroke="black"/>
+  <circle cx="182mm" cy="182mm" fill="white" r="37.8mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="182mm" cy="182mm" fill="black" r="33.6mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="182mm" cy="182mm" fill="white" r="27.3mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="182mm" cy="182mm" fill="black" r="23.099999999999998mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <circle cx="182mm" cy="182mm" fill="white" r="16.8mm" stroke-dasharray="21.0mm" stroke-width="2"/>
+  <line stroke="gray" x1="177.8mm" x2="186.2mm" y1="182mm" y2="182mm"/>
+  <line stroke="gray" x1="182mm" x2="182mm" y1="177.8mm" y2="186.2mm"/>
+  <text fill="black" font-size="10mm" text-anchor="end" x="290mm" y="10mm">A4</text>
+</svg>
