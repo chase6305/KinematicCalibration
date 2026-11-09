@@ -1,8 +1,7 @@
 # KinematicCalibration
 
-机器人运动学标定工具。直接移植 RobotKineCal 的 POE 轴几何求解器和
-`auto_calibrate_sim` 的数据、验证、零偏、URDF 导出流程，提供 NumPy 无界面后端、Viser
-浏览器回放、可复用标定板与手眼标定适配器。
+机器人运动学标定工具，支持 POE 轴几何求解、关节零偏标定、独立验证和 URDF 导出，
+提供 NumPy 无界面后端、Viser 浏览器回放、可复用标定板与手眼标定适配器。
 
 ## 快速运行
 
@@ -48,7 +47,7 @@ flowchart LR
     DS --> H[手眼适配器 OpenCV / Toolkit]
     H --> F[fit_dataset 服务]
     DS --> F
-    F --> K[移植 POE 求解器]
+    F --> K[POE 求解器]
     K --> V[独立验证 / 可辨识性]
     V --> A[模型与校验工件]
     A --> UI[Viser 回放]
@@ -57,8 +56,8 @@ flowchart LR
 
 | 模块 | 职责 |
 | --- | --- |
-| `robotkinecal` | 原求解器 API；新增 `from_screw_axes`，不强制引入 RTB |
-| `kinematic_calib` | 兼容迁移的数据和 CLI、内存拟合服务、独立验证、来源校验、URDF 导出 |
+| `robotkinecal` | POE 轴几何求解器；支持 `from_screw_axes`，不强制引入 RTB |
+| `kinematic_calib` | 数据契约和 CLI、内存拟合服务、独立验证、来源校验、URDF 导出 |
 | `kinematic_calibration.backends` | `KinematicsBackend` 协议、NumPy URDF FK、可选 Viser |
 | `kinematic_calibration.targets` | 标定板尺寸、坐标、资源、图像检测和 PnP |
 | `kinematic_calibration.handeye` | OpenCV / HandEyeCalibrationToolkit 的统一接口 |
@@ -104,7 +103,7 @@ kinematic-calib calibrate --backend numpy --calibration-type geometry \
 均准备完成后才发布；普通写入失败或Python中断会恢复原配对。进程崩溃可能留下未完成的
 配对，读取时的哈希检查会拒绝它。
 
-完整迁移的 URDF 工作流使用可选 RTB 模型适配器：
+URDF 标定与导出工作流使用可选 RTB 模型适配器：
 
 ```bash
 uv pip install --python .venv/bin/python -e '.[robotics]'
@@ -216,6 +215,6 @@ env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q
 校准 POE、名义 URDF、rank/condition/convergence 诊断、指标与哈希 manifest；移动整个
 目录仍可加载。`accepted` 仅代表声明的合成实验诊断范围，不等于实机部署验收。
 
-来源和本地改动见 [移植记录](docs/porting.md) 与 [架构说明](docs/architecture.md)。
+更多设计细节见 [架构说明](docs/architecture.md)。
 另见 [图像实验](docs/image-experiment.md)、[数据契约](docs/data-contract.md)、
 [数值约定](docs/numerics.md)、[实测性能](docs/performance.md) 和 [优化记录](docs/worklog.md)。
