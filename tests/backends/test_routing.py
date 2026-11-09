@@ -1,6 +1,7 @@
 """Visit order tests use independent path-length and permutation checks."""
 
 from itertools import permutations
+from math import dist
 
 import numpy as np
 import pytest
@@ -158,3 +159,20 @@ def test_unrepresentable_total_distance_is_rejected_without_runtime_warning():
     with np.errstate(all="raise"):
         with pytest.raises(ValueError, match="total joint-space distance exceeds"):
             plan_visit_order([[-4e307], [4e307], [-4e307], [4e307]])
+
+
+@pytest.mark.parametrize("dof", [1, 6, 7])
+@pytest.mark.parametrize("scale", [1e-200, 1.0, 1e200])
+def test_pairwise_distances_match_independent_stable_norm(dof, scale):
+    from kinematic_calibration.routing import _distance_matrix
+
+    positions = np.random.default_rng(42).uniform(-1, 1, (12, dof)) * scale
+    positions[-1] = positions[0]
+    original = positions.copy()
+    distances = _distance_matrix(positions)
+    # math.dist scales intermediate values, independently of NumPy's hypot reduction.
+    expected = np.array([[dist(a, b) for b in positions] for a in positions])
+    np.testing.assert_allclose(distances, expected, rtol=1e-14, atol=0)
+    np.testing.assert_array_equal(distances, distances.T)
+    np.testing.assert_array_equal(np.diag(distances), np.zeros(len(positions)))
+    np.testing.assert_array_equal(positions, original)
