@@ -1,12 +1,12 @@
 # KinematicCalibration
 
-独立于 DexSim 的机器人运动学标定工具。直接移植 RobotKineCal 的 POE 轴几何求解器和
+机器人运动学标定工具。直接移植 RobotKineCal 的 POE 轴几何求解器和
 `auto_calibrate_sim` 的数据、验证、零偏、URDF 导出流程，提供 NumPy 无界面后端、Viser
 浏览器回放、可复用标定板与手眼标定适配器。
 
 ## 快速运行
 
-Python 3.10–3.12；基础流程无需 GPU、ROS、DexSim 或 Robotics Toolbox。
+Python 3.10–3.12；基础流程无需 GPU、ROS 或 Robotics Toolbox。
 
 ```bash
 git clone --recurse-submodules https://github.com/chase6305/KinematicCalibration.git
@@ -199,7 +199,7 @@ NPZ可附带按列排列的 `joint_names` 和原始 `sample_indices`，也可直
 `demo --plan` 核对同一名义URDF、关节列、限位和坐标链，按计划的行顺序采样；
 不能同时使用 `--samples`。完整计划随实验归档，训练行号与候选ID映射保留。
 `view --split training` 显示训练姿态与训练误差，默认 `view` 继续显示独立验证集。
-完整的无 DexSim 示例见 [planned_calibration.py](examples/planned_calibration.py)：按计划顺序
+完整的标定示例见 [planned_calibration.py](examples/planned_calibration.py)：按计划顺序
 生成观测、归档拟合结果，再用另一批关节配置验证；也可通过Viser回放归档目录。
 
 ## 验证与开发
