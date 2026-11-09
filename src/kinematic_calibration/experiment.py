@@ -323,15 +323,11 @@ def run_experiment(
             train, calibrator, options=FitOptions(max_iterations=max_iterations)
         )
         fitted_home = fitted.zero_pose.A
-        nominal_predictions = np.asarray(
-            [nominal.forward(q) for q in validation.joint_positions]
-        )
+        nominal_predictions = nominal.forward_batch(validation.joint_positions)
         fitted_predictions = predict_poe(
             fitted.screw_axes, fitted_home, validation.joint_positions
         )
-        truth_predictions = np.asarray(
-            [truth.forward(q) for q in validation.joint_positions]
-        )
+        truth_predictions = truth.forward_batch(validation.joint_positions)
         last = fitted.result.iteration_results[-1]
         parameters = int(last.N_PARAMS)
         rank, condition = _diagnostics(last.singular_values, samples, parameters)

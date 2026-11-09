@@ -227,6 +227,37 @@ class NumpyBackend:
             pass
         return pose
 
+    def forward_batch(self, joint_positions: np.ndarray) -> np.ndarray:
+        """Return Base_T_End for each row of [N, DOF], with shape [N, 4, 4].
+
+        Empty batches are supported. As with ``forward``, this computes geometry
+        without checking joint limits, collisions, or motion feasibility.
+        """
+        raw = np.asarray(joint_positions)
+        if raw.dtype.kind not in "iuf" or raw.ndim != 2 or raw.shape[1] != self.dof:
+            raise ValueError(
+                f"joint_positions must be finite with shape (N, {self.dof})"
+            )
+        with np.errstate(over="ignore", invalid="ignore"):
+            positions = raw.astype(float, copy=False)
+        if not np.isfinite(positions).all():
+            raise ValueError(
+                f"joint_positions must be finite with shape (N, {self.dof})"
+            )
+        poses = np.broadcast_to(np.eye(4), (len(positions), 4, 4)).copy()
+        if not len(positions):
+            return poses
+        joint_index = 0
+        for joint in self.joints:
+            poses = poses @ joint.origin
+            if joint.kind != "fixed":
+                rotations = Rotation.from_rotvec(
+                    positions[:, joint_index, None] * joint.axis
+                ).as_matrix()
+                poses[:, :, :3] = poses[:, :, :3] @ rotations
+                joint_index += 1
+        return poses
+
     def poe_parameters(self) -> tuple[np.ndarray, np.ndarray]:
         """Return space screw axes (N,6), ordered [v,w], and Base_T_End(0)."""
         zero_poses = self.link_transforms(np.zeros(self.dof))

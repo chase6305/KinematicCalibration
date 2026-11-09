@@ -695,8 +695,8 @@ def run_image_experiment(
         fitted_predictions = predict_poe(
             fitted.screw_axes, fitted.zero_pose.A, robot_validation.joint_positions
         )
-        nominal_predictions = np.asarray(
-            [nominal.forward(q) for q in robot_validation.joint_positions]
+        nominal_predictions = nominal.forward_batch(
+            robot_validation.joint_positions
         )
         last = fitted.result.iteration_results[-1]
         condition = float(last.condition_number)
