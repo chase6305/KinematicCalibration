@@ -32,11 +32,14 @@ def _configurations(value, *, name, shape=None):
 
 
 def _distance_matrix(configurations):
-    # Fill one row at a time to avoid an [N, N, DOF] temporary array.
+    # Compute each unordered pair once, without an [N, N, DOF] temporary.
     distances = np.empty((len(configurations), len(configurations)))
+    np.fill_diagonal(distances, 0.0)
     with np.errstate(over="ignore", invalid="ignore"):
-        for index, configuration in enumerate(configurations):
-            distances[index] = np.hypot.reduce(configurations - configuration, axis=1)
+        for index, configuration in enumerate(configurations[:-1]):
+            row = np.hypot.reduce(configurations[index + 1 :] - configuration, axis=1)
+            distances[index, index + 1 :] = row
+            distances[index + 1 :, index] = row
     if not np.isfinite(distances).all():
         raise ValueError("joint-space distances exceed the finite numeric range")
     return distances
