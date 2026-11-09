@@ -111,3 +111,71 @@ def test_finite_extended_precision_inputs_must_remain_finite_in_float64():
         robot.forward(positions)
     with pytest.raises(ValueError, match="finite"):
         robot.link_transforms(positions)
+
+
+@pytest.mark.parametrize("subchain", [False, True])
+@pytest.mark.parametrize("perturbed", [False, True])
+def test_batch_matches_scalar_and_poe_for_noncontiguous_inputs(subchain, perturbed):
+    robot = NumpyBackend.from_urdf(
+        example_urdf(), end_link="ee_link", base_link="Link1" if subchain else None
+    )
+    if perturbed:
+        robot = robot.perturbed(seed=9)
+    positions = np.random.default_rng(7).uniform(-2, 2, (24, robot.dof))[::2]
+    original = positions.copy()
+    expected = np.asarray([robot.forward(q) for q in positions])
+    actual = robot.forward_batch(positions)
+    np.testing.assert_allclose(actual, expected, atol=1e-14, rtol=0)
+    np.testing.assert_allclose(
+        actual, predict_poe(*robot.poe_parameters(), positions), atol=1e-12
+    )
+    np.testing.assert_array_equal(positions, original)
+    assert not np.shares_memory(actual, positions)
+    actual[0] = 0
+    np.testing.assert_allclose(robot.forward(positions[1]), actual[1], atol=1e-14)
+
+
+def test_batch_arbitrary_axis_and_fixed_tool(tmp_path):
+    robot = NumpyBackend.from_urdf(write_chain(tmp_path), end_link="tool")
+    positions = np.array([[-0.5], [0], [0.5]])
+    np.testing.assert_allclose(
+        robot.forward_batch(positions),
+        np.asarray([robot.forward(q) for q in positions]),
+        atol=1e-14,
+    )
+    assert robot.forward_batch(np.empty((0, robot.dof))).shape == (0, 4, 4)
+    np.testing.assert_allclose(
+        robot.forward_batch([[0]])[0], robot.forward([0]), atol=1e-14
+    )
+
+
+@pytest.mark.parametrize(
+    "positions",
+    [
+        [],
+        [0] * 6,
+        np.zeros((2, 5)),
+        np.zeros((2, 6, 1)),
+        [[True] * 6],
+        [[1j] * 6],
+        [["0"] * 6],
+        [[np.nan] * 6],
+        [[np.inf] * 6],
+    ],
+)
+def test_batch_rejects_invalid_joint_inputs(positions):
+    robot = NumpyBackend.from_urdf(example_urdf(), end_link="ee_link")
+    with pytest.raises(ValueError, match="joint_positions"):
+        robot.forward_batch(positions)
+
+
+@pytest.mark.skipif(
+    np.finfo(np.longdouble).max <= np.finfo(float).max,
+    reason="platform longdouble has the same range as float64",
+)
+def test_batch_rejects_values_outside_float64_range():
+    robot = NumpyBackend.from_urdf(example_urdf(), end_link="ee_link")
+    positions = np.zeros((1, robot.dof), dtype=np.longdouble)
+    positions[0, 0] = np.longdouble("1e400")
+    with np.errstate(all="raise"), pytest.raises(ValueError, match="finite"):
+        robot.forward_batch(positions)
