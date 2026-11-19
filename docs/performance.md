@@ -1,5 +1,7 @@
 # POE 求解与规划回归矩阵性能
 
+2026-11-19 的新增测量见 [SVD 复用与 Huber IRLS 内存](fit-performance.md)。
+
 2026-11-03 第二阶段先测量第一阶段参考实现，再引入批处理。
 `benchmarks/profile_solver.py` 固定随机种子 `20261103`，生成 6/7 自由度
 任意转轴串联模型，分别使用 100、500、2000 个训练姿态和独立 80 个留出姿态。
@@ -254,46 +256,3 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python \
   benchmarks/profile_handeye.py --samples 1000 --workflows influence \
   --methods shah --repeats 1 --output /tmp/handeye-influence-profile.json
 ```
-
-## Huber IRLS 的跨轮峰值内存
-
-每轮的权重和诊断提取完毕后，下一轮不再需要上一轮的拟合结果。显式释放结果及末次
-迭代引用，避免下一轮求解分配新快照时仍保留上一轮的全部回归矩阵。最终结果、最大轮数
-停止和提前收敛路径保持原样；工厂的对象复用及名义几何检查继续使用原有强引用。
-
-2026-11-19，AMD Ryzen 9 9950X / Linux x86_64，Python 3.10.0，NumPy 1.26.4，
-SciPy 1.15.3；BLAS、OMP、MKL、NumExpr 线程均为 1。对比 `234ec74`，每组前后各运行
-三个独立新进程，交替顺序，下面是进程峰值 RSS 中位数。峰值在拟合完成后立即读取，
-包含导入与输入构造，不包含随后生成报告的额外内存。
-
-| 训练样本 | 原峰值 RSS | 释放旧结果后 | 减少 | 外层轮数 |
-| --- | --- | --- | --- | --- |
-| 100 | 90.05 MiB | 88.99 MiB | 1.2% | 6 |
-| 1000 | 120.00 MiB | 110.05 MiB | 8.3% | 4 |
-| 10000 | 385.18 MiB | 275.19 MiB | 28.6% | 4 |
-
-输入来自独立扰动的六轴真值及合成位姿传感器，5% 的训练观测加入异常，100 条独立
-留出观测不受污染。seed 为 42，固定位置/角度尺度为 0.0001 m / 0.0002 rad。前后参数、
-全部稳健诊断、输入指纹和留出指标逐字段一致。内层迭代次数也相同：100 样本每轮 3 次，
-1000 样本为 3/4/4/4 次，10000 样本每轮 3 次。
-
-10000 样本完整拟合的 CPU 中位数为 2.571 → 2.636 s；本改动不声称减少求解时间。
-峰值收益依赖内层迭代次数和样本量。原始记录保留在本次会话
-`/tmp/kincal-irls-lifetime/paired/report.json`。
-
-新增生命周期回归在旧版本上先复现两个多轮用例失败；修改后 47 项 Huber 测试通过，
-覆盖末轮保留、最大轮数停止、提前收敛、工厂复用及污染观测。
-以当前安装版本复现单次测量（每次调用必须是新进程，重复时取中位数）：
-
-```bash
-# 启动前按共享机器约定检查可用内存、负载和相关进程
-flock -n -E 75 /home/ubuntu/.cache/codex-heavy-work.lock \
-  env -u PYTHONPATH OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
-  MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 nice -n 10 \
-  .venv/bin/python benchmarks/profile_robust.py --samples 10000 \
-  --output /tmp/robust-profile.json
-```
-
-基准记录源码哈希、依赖版本、线程环境、CPU affinity、启动负载、输入/参数/诊断指纹，
-并检查输入未改变。拟合 CPU/wall 计时排除输入构造、GC、导入及留出评估；RSS 的范围
-更广，不能把它当作仅 NumPy 数组的大小或对象分配总量。

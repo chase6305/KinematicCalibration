@@ -23,6 +23,7 @@ import statistics
 import sys
 import time
 from datetime import datetime, timezone
+from importlib.metadata import version
 from pathlib import Path
 
 import numpy as np
@@ -94,11 +95,27 @@ def problem(dof, samples, seed):
     )
 
 
-def make_calibrator(inputs):
+def make_calibrator(inputs, position_only=False):
     axes, home, joints, observations, _, _ = inputs
     calibrator = SerialRobotKineCal.from_screw_axes(axes, home)
-    calibrator.set_observations(joints, [SE3(pose) for pose in observations])
+    measured = (
+        list(observations[:, :3, 3])
+        if position_only
+        else [SE3(pose, check=False) for pose in observations]
+    )
+    calibrator.set_observations(joints, measured)
     return calibrator
+
+
+def solve_options(samples, max_iterations, linear_weights):
+    options = {"max_iterations": max_iterations}
+    if linear_weights:
+        options.update(
+            sample_weights=np.linspace(0.2, 1.3, samples),
+            position_weight=2.0,
+            orientation_weight=0.3,
+        )
+    return options
 
 
 def validate(calibrator, inputs):
@@ -147,15 +164,26 @@ def profile_rows(profiler, limit=20):
     }
 
 
-def measure_case(dof, samples, seed, repeats, max_iterations):
+def measure_case(
+    dof,
+    samples,
+    seed,
+    repeats,
+    max_iterations,
+    *,
+    position_only=False,
+    linear_weights=False,
+    skip_regressors=False,
+):
     inputs = problem(dof, samples, seed)
     rows = []
     regressor_times = []
     batch_regressor_times = []
     for _ in range(repeats):
-        calibrator = make_calibrator(inputs)
+        calibrator = make_calibrator(inputs, position_only)
+        options = solve_options(samples, max_iterations, linear_weights)
         start_wall, start_cpu = time.perf_counter(), time.process_time()
-        result = calibrator.solve(max_iterations=max_iterations)
+        result = calibrator.solve(**options)
         wall, cpu = time.perf_counter() - start_wall, time.process_time() - start_cpu
         final = result.iteration_results[-1]
         rows.append(
@@ -169,13 +197,15 @@ def measure_case(dof, samples, seed, repeats, max_iterations):
                 **validate(calibrator, inputs),
             }
         )
+        if skip_regressors:
+            continue
         # Build the exact regressor blocks used by planning, without data
         # generation, candidate scoring, or another solve in this interval.
-        planning_calibrator = make_calibrator(inputs)
+        planning_calibrator = make_calibrator(inputs, position_only)
         regressor_start = time.perf_counter()
         blocks = np.asarray([planning_calibrator.A_Matrix(q) for q in inputs[2]])
         regressor_times.append(time.perf_counter() - regressor_start)
-        assert blocks.shape == (samples, 6, 4 * dof + 6)
+        assert blocks.shape == (samples, 6, planning_calibrator.N_PARAMS)
         if hasattr(planning_calibrator, "regressor_blocks"):
             batch_regressor_start = time.perf_counter()
             batch_blocks = planning_calibrator.regressor_blocks(inputs[2])
@@ -184,6 +214,8 @@ def measure_case(dof, samples, seed, repeats, max_iterations):
     return {
         "dof": dof,
         "samples": samples,
+        "position_only": position_only,
+        "linear_weights": linear_weights,
         "runs": rows,
         "median_solve_wall_seconds": statistics.median(
             row["wall_seconds"] for row in rows
@@ -192,7 +224,9 @@ def measure_case(dof, samples, seed, repeats, max_iterations):
             row["cpu_seconds"] for row in rows
         ),
         "regressor_wall_seconds": regressor_times,
-        "median_regressor_wall_seconds": statistics.median(regressor_times),
+        "median_regressor_wall_seconds": statistics.median(regressor_times)
+        if regressor_times
+        else None,
         "batch_regressor_wall_seconds": batch_regressor_times,
         "median_batch_regressor_wall_seconds": statistics.median(batch_regressor_times)
         if batch_regressor_times
@@ -202,7 +236,6 @@ def measure_case(dof, samples, seed, repeats, max_iterations):
 
 def metadata():
     import scipy
-    import spatialmath
 
     core_path = Path(sys.modules[SerialRobotKineCal.__module__].__file__)
     batch_path = core_path.parent / "_batch.py"
@@ -213,7 +246,10 @@ def metadata():
         "platform": platform.platform(),
         "numpy": np.__version__,
         "scipy": scipy.__version__,
-        "spatialmath": getattr(spatialmath, "__version__", "unknown"),
+        "spatialmath": version("spatialmath-python"),
+        "benchmark_source_sha256": hashlib.sha256(
+            Path(__file__).read_bytes()
+        ).hexdigest(),
         "core_source_sha256": hashlib.sha256(core_path.read_bytes()).hexdigest(),
         "batch_source_sha256": hashlib.sha256(batch_path.read_bytes()).hexdigest()
         if batch_path.exists()
@@ -223,7 +259,12 @@ def metadata():
         else None,
         "blas_threads_env": {
             key: os.environ.get(key)
-            for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")
+            for key in (
+                "OPENBLAS_NUM_THREADS",
+                "OMP_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS",
+            )
         },
         "truth_evaluator": "independent closed-form rigid rotations, not SpatialMath Twist3",
         "timing_scope": "solve only; synthetic data, set_observations, held-out evaluation excluded",
@@ -238,6 +279,17 @@ def main():
     parser.add_argument("--seed", type=int, default=20261103)
     parser.add_argument("--max-iterations", type=int, default=15)
     parser.add_argument("--profile-samples", type=int, default=500)
+    parser.add_argument("--position-only", action="store_true")
+    parser.add_argument(
+        "--linear-weights",
+        action="store_true",
+        help="use linearly spaced sample multipliers and fixed position/orientation weights",
+    )
+    parser.add_argument(
+        "--skip-regressors",
+        action="store_true",
+        help="skip separate scalar/batch regressor timings and profiles",
+    )
     parser.add_argument(
         "--output", type=Path, default=Path("outputs/solver-profile.json")
     )
@@ -259,7 +311,14 @@ def main():
     for dof in args.dof:
         for samples in args.samples:
             case = measure_case(
-                dof, samples, args.seed, args.repeats, args.max_iterations
+                dof,
+                samples,
+                args.seed,
+                args.repeats,
+                args.max_iterations,
+                position_only=args.position_only,
+                linear_weights=args.linear_weights,
+                skip_regressors=args.skip_regressors,
             )
             report["cases"].append(case)
             print(
@@ -279,24 +338,28 @@ def main():
                 flush=True,
             )
     inputs = problem(max(args.dof), args.profile_samples, args.seed)
-    calibrator = make_calibrator(inputs)
+    calibrator = make_calibrator(inputs, args.position_only)
+    options = solve_options(
+        args.profile_samples, args.max_iterations, args.linear_weights
+    )
     profiler = cProfile.Profile()
     profiler.enable()
-    calibrator.solve(max_iterations=args.max_iterations)
+    calibrator.solve(**options)
     profiler.disable()
     report["solve_profile"] = profile_rows(profiler)
-    planning_calibrator = make_calibrator(inputs)
-    planning_profiler = cProfile.Profile()
-    planning_profiler.enable()
-    _ = np.asarray([planning_calibrator.A_Matrix(q) for q in inputs[2]])
-    planning_profiler.disable()
-    report["regressor_profile"] = profile_rows(planning_profiler)
-    if hasattr(planning_calibrator, "regressor_blocks"):
-        batch_planning_profiler = cProfile.Profile()
-        batch_planning_profiler.enable()
-        _ = planning_calibrator.regressor_blocks(inputs[2])
-        batch_planning_profiler.disable()
-        report["batch_regressor_profile"] = profile_rows(batch_planning_profiler)
+    if not args.skip_regressors:
+        planning_calibrator = make_calibrator(inputs, args.position_only)
+        planning_profiler = cProfile.Profile()
+        planning_profiler.enable()
+        _ = np.asarray([planning_calibrator.A_Matrix(q) for q in inputs[2]])
+        planning_profiler.disable()
+        report["regressor_profile"] = profile_rows(planning_profiler)
+        if hasattr(planning_calibrator, "regressor_blocks"):
+            batch_planning_profiler = cProfile.Profile()
+            batch_planning_profiler.enable()
+            _ = planning_calibrator.regressor_blocks(inputs[2])
+            batch_planning_profiler.disable()
+            report["batch_regressor_profile"] = profile_rows(batch_planning_profiler)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     print(f"Saved {args.output}", flush=True)

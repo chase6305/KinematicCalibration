@@ -45,9 +45,12 @@ def _rank_from_singular_values(singular_values, matrix_shape):
     return int(np.count_nonzero(singular_values > tolerance))
 
 
-def _regressor_statistics(matrix):
-    """Derive rank, spectrum and 2-norm condition from a single SVD."""
-    singular_values = np.linalg.svd(matrix, compute_uv=False)
+def _regressor_statistics(matrix, singular_values=None):
+    """Derive diagnostics, reusing a matching solver spectrum when supplied."""
+    if singular_values is None:
+        singular_values = np.linalg.svd(matrix, compute_uv=False)
+    else:
+        singular_values = singular_values.copy()
     rank = _rank_from_singular_values(singular_values, matrix.shape)
     condition = (
         float(singular_values[0] / singular_values[-1])
@@ -142,6 +145,9 @@ class CalibrationResult:
             post_update_objective_norm: float | None = None,
             objective_scale: float = 1.0,
             row_weights: np.ndarray | None = None,
+            *,
+            _raw_singular_values: np.ndarray | None = None,
+            _weighted_singular_values: np.ndarray | None = None,
         ) -> None:
             """
             Initialize the iteration result.
@@ -212,11 +218,12 @@ class CalibrationResult:
             self.position_only = self.OBS_SIZE == 3
 
             # Observability diagnostics for the linearized calibration problem.
+            # The solver may supply its rank-check spectrum; own a snapshot.
             (
                 self.matrix_rank,
                 self.singular_values,
                 self.condition_number,
-            ) = _regressor_statistics(self.A_all)
+            ) = _regressor_statistics(self.A_all, _raw_singular_values)
             self.row_weights = (
                 np.ones(self.A_all.shape[0])
                 if row_weights is None
@@ -239,7 +246,9 @@ class CalibrationResult:
                     self.weighted_matrix_rank,
                     self.weighted_singular_values,
                     self.weighted_condition_number,
-                ) = _regressor_statistics(self.weighted_A_all)
+                ) = _regressor_statistics(
+                    self.weighted_A_all, _weighted_singular_values
+                )
             self.uncertainty_method = "local_linear_weighted_residual_heuristic"
 
         def compute_uncertainty_estimate(self, A_all, x_all, y_all):
@@ -1320,6 +1329,7 @@ class SerialRobotKineCal:
                 "Combined residual weights must remain positive and finite."
             )
         objective_scale = float(np.max(row_weights))
+        unit_row_weights = bool(np.all(row_weights == 1.0))
 
         for _ in range(max_iterations):
             residuals, regressor, position_errors, orientation_errors = (
@@ -1329,7 +1339,12 @@ class SerialRobotKineCal:
             weighted_residuals = row_weights[:, None] * residuals
 
             identifiable_parameter_indices = np.array(range(self.N_PARAMS))
-            regressor_rank = np.linalg.matrix_rank(weighted_regressor)
+            weighted_singular_values = np.linalg.svd(
+                weighted_regressor, compute_uv=False
+            )
+            regressor_rank = _rank_from_singular_values(
+                weighted_singular_values, weighted_regressor.shape
+            )
             if regressor_rank < len(identifiable_parameter_indices):
                 if (
                     self.position_only
@@ -1449,6 +1464,10 @@ class SerialRobotKineCal:
                 post_update_objective_norm,
                 objective_scale,
                 row_weights,
+                _raw_singular_values=(
+                    weighted_singular_values if unit_row_weights else None
+                ),
+                _weighted_singular_values=weighted_singular_values,
             )
             calibration_result.add_iteration_result(iteration_result)
 
