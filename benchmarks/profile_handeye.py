@@ -5,11 +5,14 @@
         .venv/bin/python benchmarks/profile_handeye.py --output /tmp/handeye.json
 
 Influence is opt-in: --workflows influence --methods shah --repeats 1.
+Use --workflows inspect solve to isolate motion inspection and ordinary solving.
 Imports, generation, one full warmup per case and driver checks are untimed.
 """
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import logging
 import os
@@ -68,33 +71,44 @@ def write_observations(path, samples, seed):
 
 
 def measure_case(source, output, count, workflow, method, args):
-    argv = [workflow, "--samples", str(source), "--output", str(output), "--force"]
+    argv = [workflow, "--samples", str(source)]
+    if workflow != "inspect":
+        argv += ["--output", str(output), "--force"]
     if method:
         argv += ["--method", method]
     if workflow == "bootstrap":
         argv += ["--replicates", str(args.replicates), "--seed", str(args.seed)]
     input_sha = sha256(source)
 
-    def checked_result():
-        result = json.loads(output.read_text())
+    def invoke():
+        if workflow == "inspect":
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                status = handeye_cli.main(argv)
+            return status, captured.getvalue()
+        return handeye_cli.main(argv), None
+
+    def checked_result(stdout):
+        result = json.loads(stdout if workflow == "inspect" else output.read_text())
         assert sha256(source) == input_sha, "input archive changed"
-        assert result["observations_npz_sha256"] == input_sha
+        if workflow != "inspect":
+            assert result["observations_npz_sha256"] == input_sha
+            result.pop("provenance")
         assert result["samples"] == count
         if "candidate_indices" in result:
             assert result["candidate_indices"] == list(range(count))
-        result.pop("provenance")
         return json.dumps(result, sort_keys=True, allow_nan=False)
 
-    warmup_status = handeye_cli.main(argv)
+    warmup_status, stdout = invoke()
     assert warmup_status == 0, "warmup failed"
-    reference, runs = checked_result(), []
+    reference, runs = checked_result(stdout), []
     for _ in range(args.repeats):
         wall_started, cpu_started = time.perf_counter(), time.process_time()
-        status = handeye_cli.main(argv)
+        status, stdout = invoke()
         wall = time.perf_counter() - wall_started
         cpu = time.process_time() - cpu_started
         assert status == 0, f"{workflow} failed"
-        assert checked_result() == reference, "result changed"
+        assert checked_result(stdout) == reference, "result changed"
         runs.append({"wall_seconds": wall, "cpu_seconds": cpu})
     return {
         "samples": count,
@@ -119,7 +133,7 @@ def main():
     parser.add_argument(
         "--workflows",
         nargs="+",
-        choices=["compare", "bootstrap", "influence"],
+        choices=["compare", "bootstrap", "influence", "inspect", "solve"],
         default=["compare", "bootstrap"],
     )
     parser.add_argument(
@@ -158,10 +172,16 @@ def main():
                 "opencv": cv.__version__,
             },
             "platform": platform.platform(),
+            "cpu_affinity": sorted(os.sched_getaffinity(0))
+            if hasattr(os, "sched_getaffinity")
+            else None,
+            "load_average_at_start": os.getloadavg()
+            if hasattr(os, "getloadavg")
+            else None,
             "source_sha256": source_hashes,
             "thread_environment": {key: os.environ.get(key) for key in thread_keys},
             "opencv_threads": cv.getNumThreads(),
-            "timing_scope": "complete handeye_cli.main: loading, checks, solving and atomic writes; success logs suppressed; imports, generation, one full warmup per case and driver checks excluded",
+            "timing_scope": "complete handeye_cli.main: loading, checks, solving and atomic writes where applicable; inspect stdout captured; success logs suppressed; imports, generation, one full warmup per case and driver checks excluded",
             "truth": "independently specified SE(3) poses plus small camera noise; no nominal FK",
         },
         "arguments": vars(args) | {"output": str(args.output)},
@@ -173,7 +193,9 @@ def main():
             source = directory / f"samples-{samples}.npz"
             write_observations(source, samples, args.seed)
             for workflow in args.workflows:
-                for method in [None] if workflow == "compare" else args.methods:
+                for method in (
+                    [None] if workflow in ("compare", "inspect") else args.methods
+                ):
                     case = measure_case(
                         source,
                         directory / "result.json",
@@ -184,7 +206,7 @@ def main():
                     )
                     report["cases"].append(case)
                     print(
-                        f"N={samples} {workflow}/{method or 'shah+li'}: "
+                        f"N={samples} {workflow}/{method or ('shah+li' if workflow == 'compare' else 'motion')}: "
                         f"{case['median_wall_seconds']:.6f}s wall, "
                         f"{case['median_cpu_seconds']:.6f}s CPU",
                         flush=True,
