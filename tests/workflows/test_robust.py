@@ -244,6 +244,256 @@ def test_max_outer_limit_does_not_claim_stable_huber_weights(monkeypatch):
     assert all(row["residual_multiplier"] == 1 for row in diagnostics["samples"])
 
 
+@pytest.mark.parametrize("max_outer_iterations", [1, 2, 4])
+def test_completed_inner_results_are_released_before_the_next_fit(
+    monkeypatch, max_outer_iterations
+):
+    import gc
+    import weakref
+
+    import kinematic_calib.service as service
+
+    previous = []
+
+    def inner_fit(dataset, calibrator, **kwargs):
+        gc.collect()
+        for fit_reference, snapshots in previous:
+            assert fit_reference() is None, "previous inner fit is still retained"
+            assert all(reference() is None for reference in snapshots), (
+                "previous iteration's regressor snapshots are still retained"
+            )
+        fitted = _stub_inner_fit(dataset, calibrator, **kwargs)
+        last = fitted.result.iteration_results[-1]
+        last.A_all = np.ones((18, 10))
+        last.weighted_A_all = last.A_all.copy()
+        previous.append(
+            (
+                weakref.ref(fitted),
+                [weakref.ref(last.A_all), weakref.ref(last.weighted_A_all)],
+            )
+        )
+        return fitted
+
+    monkeypatch.setattr(service, "fit_dataset", inner_fit)
+    fitted = fit_dataset(
+        _dataset(),
+        options=FitOptions(
+            robust=HuberOptions(0.001, 0.002, max_outer_iterations=max_outer_iterations)
+        ),
+        calibrator_factory=_one_joint_calibrator,
+    )
+
+    assert len(previous) == min(max_outer_iterations, 2)
+    last = fitted.result.iteration_results[-1]
+    assert previous[-1][1][0]() is last.A_all
+    assert previous[-1][1][1]() is last.weighted_A_all
+    assert fitted.robust_diagnostics["outer_converged"] == (max_outer_iterations > 1)
+
+
+def _varying_endpoint_errors(monkeypatch):
+    """Keep lifetime tests active independently of numerical convergence."""
+    import kinematic_calib.robust as robust
+
+    calls = 0
+
+    def errors(*args):
+        nonlocal calls
+        calls += 1
+        return {
+            "sample_errors": [
+                {"position_error_m": 0.01 * calls * row, "orientation_error_rad": 0}
+                for row in (1, 2, 3)
+            ]
+        }
+
+    monkeypatch.setattr(robust, "evaluate_saved_poe", errors)
+
+
+def test_builtin_factory_models_do_not_retain_previous_observations(monkeypatch):
+    import weakref
+
+    from spatialmath import SE3
+
+    import kinematic_calib.service as service
+
+    references = []
+    observations = []
+
+    def factory():
+        model = _one_joint_calibrator()
+        data = _dataset()
+        model.set_observations(
+            data.joint_positions,
+            [SE3(pose, check=False) for pose in data.observed_poses],
+        )
+        references.append(weakref.ref(model))
+        observations.append(weakref.ref(model._observation_array))
+        return model
+
+    def inner(dataset, calibrator, **kwargs):
+        assert references[-1]() is calibrator
+        assert all(reference() is None for reference in references[:-1])
+        assert all(reference() is None for reference in observations[:-1])
+        return _stub_inner_fit(dataset, calibrator, **kwargs)
+
+    _varying_endpoint_errors(monkeypatch)
+    monkeypatch.setattr(service, "fit_dataset", inner)
+    fit = fit_dataset(
+        _dataset(),
+        calibrator_factory=factory,
+        options=FitOptions(robust=HuberOptions(0.001, 0.002, max_outer_iterations=4)),
+    )
+
+    assert len(references) == len(fit.robust_diagnostics["iterations"]) == 4
+    assert all(reference() is None for reference in references)
+    assert all(reference() is None for reference in observations)
+
+
+def test_none_after_prior_models_are_collected_keeps_initialization_error(monkeypatch):
+    import kinematic_calib.service as service
+
+    calls = 0
+
+    def factory():
+        nonlocal calls
+        calls += 1
+        return None if calls == 3 else _one_joint_calibrator()
+
+    _varying_endpoint_errors(monkeypatch)
+    monkeypatch.setattr(service, "fit_dataset", _stub_inner_fit)
+    with pytest.raises(ValueError, match="must return an initialized POE calibrator"):
+        fit_dataset(
+            _dataset(),
+            calibrator_factory=factory,
+            options=FitOptions(
+                robust=HuberOptions(0.001, 0.002, max_outer_iterations=4)
+            ),
+        )
+    assert calls == 3
+
+
+class _SlottedCalibrator:
+    __slots__ = ("model",)
+
+    def __init__(self):
+        self.model = _one_joint_calibrator()
+
+    def __getattr__(self, name):
+        return getattr(self.model, name)
+
+    def __eq__(self, other):
+        raise AssertionError("factory identity checks must not call equality")
+
+
+@pytest.mark.parametrize("slotted", [False, True])
+def test_factory_cannot_reuse_an_older_object_after_an_intervening_round(
+    monkeypatch, slotted
+):
+    import kinematic_calib.service as service
+
+    factory_type = _SlottedCalibrator if slotted else _one_joint_calibrator
+    first, second = factory_type(), factory_type()
+    sequence = iter([first, second, first])
+    _varying_endpoint_errors(monkeypatch)
+    monkeypatch.setattr(service, "fit_dataset", _stub_inner_fit)
+    with pytest.raises(ValueError, match="reused an existing object"):
+        fit_dataset(
+            _dataset(),
+            calibrator_factory=lambda: next(sequence),
+            options=FitOptions(
+                robust=HuberOptions(0.001, 0.002, max_outer_iterations=4)
+            ),
+        )
+
+
+@pytest.mark.parametrize("slotted", [False, True])
+def test_custom_factory_objects_keep_their_existing_lifetimes(monkeypatch, slotted):
+    import weakref
+
+    import kinematic_calib.service as service
+    from robotkinecal import SerialRobotKineCal
+
+    finalized = []
+    references = []
+
+    class DerivedCalibrator(SerialRobotKineCal):
+        def __del__(self):
+            finalized.append(self.ordinal)
+
+    def factory():
+        if slotted:
+            model = _SlottedCalibrator()
+            with pytest.raises(TypeError):
+                weakref.ref(model)
+            references.append(weakref.ref(model.model))
+        else:
+            model = DerivedCalibrator.from_screw_axes(
+                np.array([[0, 0, 0, 0, 0, 1]], dtype=float),
+                np.eye(4),
+                joint_names=["joint"],
+            )
+            model.ordinal = len(references) + 1
+            references.append(weakref.ref(model))
+        return model
+
+    def inner(dataset, calibrator, **kwargs):
+        assert all(reference() is not None for reference in references)
+        assert not finalized
+        return _stub_inner_fit(dataset, calibrator, **kwargs)
+
+    _varying_endpoint_errors(monkeypatch)
+    monkeypatch.setattr(service, "fit_dataset", inner)
+    fit = fit_dataset(
+        _dataset(),
+        calibrator_factory=factory,
+        options=FitOptions(robust=HuberOptions(0.001, 0.002, max_outer_iterations=4)),
+    )
+
+    assert len(fit.robust_diagnostics["iterations"]) == len(references) == 4
+    assert all(reference() is None for reference in references)
+    if not slotted:
+        assert sorted(finalized) == [1, 2, 3, 4]
+
+
+def test_models_with_external_robot_resources_keep_their_existing_lifetimes(
+    monkeypatch,
+):
+    import weakref
+
+    import kinematic_calib.service as service
+
+    references, finalized = [], []
+
+    class RobotResource:
+        def __init__(self, ordinal):
+            self.ordinal = ordinal
+
+        def __del__(self):
+            finalized.append(self.ordinal)
+
+    def factory():
+        model = _one_joint_calibrator()
+        model.robot_model = RobotResource(len(references) + 1)
+        references.append(weakref.ref(model))
+        return model
+
+    def inner(dataset, calibrator, **kwargs):
+        assert not finalized
+        assert all(reference() is not None for reference in references)
+        return _stub_inner_fit(dataset, calibrator, **kwargs)
+
+    _varying_endpoint_errors(monkeypatch)
+    monkeypatch.setattr(service, "fit_dataset", inner)
+    fit_dataset(
+        _dataset(),
+        calibrator_factory=factory,
+        options=FitOptions(robust=HuberOptions(0.001, 0.002, max_outer_iterations=4)),
+    )
+    assert len(references) == 4
+    assert all(reference() is None for reference in references)
+    assert sorted(finalized) == [1, 2, 3, 4]
+
+
 def _contaminated_problem(seed, fraction):
     from scipy.spatial.transform import Rotation
 

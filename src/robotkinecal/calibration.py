@@ -39,15 +39,64 @@ def _rigid_pose(matrix):
     return SE3(matrix.copy(), check=False)
 
 
+def _copy_pose_observations(observations):
+    """Copy ordinary SE3 observations well inside the scalar rigidity bounds."""
+    if (
+        type(observations) not in (list, tuple)
+        or len(observations) < 16
+        or np.geterr()
+        != {"divide": "warn", "over": "warn", "under": "ignore", "invalid": "warn"}
+    ):
+        return None
+    # An unusual internal container can raise from A before an earlier pose's
+    # scalar error has been reported. Leave those objects to the scalar loop.
+    if not all(
+        type(observation) is SE3
+        and type(getattr(observation, "data", None)) is list
+        and len(observation.data) == 1
+        for observation in observations
+    ):
+        return None
+    # Certify only the interior of the 1e-12 scalar tolerance. Boundary and
+    # invalid inputs retain the scalar validator, error order and causes.
+    normalized = []
+    with np.errstate(over="ignore", invalid="ignore"):
+        for start in range(0, len(observations), 1024):
+            matrices = [pose.A for pose in observations[start : start + 1024]]
+            if any(
+                type(matrix) is not np.ndarray
+                or matrix.shape != (4, 4)
+                or matrix.dtype != np.dtype(float)
+                for matrix in matrices
+            ):
+                return None
+            values = np.array(matrices, dtype=float, order="C", copy=True)
+            if not np.isfinite(values).all():
+                return None
+            rotations = values[:, :3, :3]
+            if not (
+                np.max(np.abs(rotations.transpose(0, 2, 1) @ rotations - np.eye(3)))
+                <= 1e-14
+                and np.max(np.abs(np.linalg.det(rotations) - 1.0)) <= 1e-14
+                and np.max(np.abs(values[:, 3] - [0, 0, 0, 1])) <= 1e-14
+            ):
+                return None
+            normalized.extend(SE3(matrix.copy(), check=False) for matrix in values)
+    return normalized
+
+
 def _rank_from_singular_values(singular_values, matrix_shape):
     """Match NumPy's default numerical rank without factoring the matrix again."""
     tolerance = singular_values[0] * max(matrix_shape) * np.finfo(singular_values.dtype).eps
     return int(np.count_nonzero(singular_values > tolerance))
 
 
-def _regressor_statistics(matrix):
-    """Derive rank, spectrum and 2-norm condition from a single SVD."""
-    singular_values = np.linalg.svd(matrix, compute_uv=False)
+def _regressor_statistics(matrix, singular_values=None):
+    """Derive diagnostics, reusing a matching solver spectrum when supplied."""
+    if singular_values is None:
+        singular_values = np.linalg.svd(matrix, compute_uv=False)
+    else:
+        singular_values = singular_values.copy()
     rank = _rank_from_singular_values(singular_values, matrix.shape)
     condition = (
         float(singular_values[0] / singular_values[-1])
@@ -142,6 +191,9 @@ class CalibrationResult:
             post_update_objective_norm: float | None = None,
             objective_scale: float = 1.0,
             row_weights: np.ndarray | None = None,
+            *,
+            _raw_singular_values: np.ndarray | None = None,
+            _weighted_singular_values: np.ndarray | None = None,
         ) -> None:
             """
             Initialize the iteration result.
@@ -212,11 +264,12 @@ class CalibrationResult:
             self.position_only = self.OBS_SIZE == 3
 
             # Observability diagnostics for the linearized calibration problem.
+            # The solver may supply its rank-check spectrum; own a snapshot.
             (
                 self.matrix_rank,
                 self.singular_values,
                 self.condition_number,
-            ) = _regressor_statistics(self.A_all)
+            ) = _regressor_statistics(self.A_all, _raw_singular_values)
             self.row_weights = (
                 np.ones(self.A_all.shape[0])
                 if row_weights is None
@@ -239,7 +292,9 @@ class CalibrationResult:
                     self.weighted_matrix_rank,
                     self.weighted_singular_values,
                     self.weighted_condition_number,
-                ) = _regressor_statistics(self.weighted_A_all)
+                ) = _regressor_statistics(
+                    self.weighted_A_all, _weighted_singular_values
+                )
             self.uncertainty_method = "local_linear_weighted_residual_heuristic"
 
         def compute_uncertainty_estimate(self, A_all, x_all, y_all):
@@ -811,40 +866,50 @@ class SerialRobotKineCal:
         if len(observations) == 0:
             raise ValueError("At least one observation is required.")
 
-        normalized_joint_positions = []
-        for index, positions in enumerate(joint_positions):
-            positions = _real_array(positions, f"Joint configuration {index}").reshape(
-                -1
-            )
-            if positions.shape != (self.N_JOINTS,):
-                raise ValueError(
-                    f"Joint configuration {index} must contain exactly "
-                    f"{self.N_JOINTS} values."
+        if (
+            type(joint_positions) is np.ndarray
+            and joint_positions.dtype == np.dtype(float)
+            and joint_positions.shape == (len(observations), self.N_JOINTS)
+            and np.isfinite(joint_positions).all()
+        ):
+            normalized_joint_positions = [row.copy() for row in joint_positions]
+        else:
+            normalized_joint_positions = []
+            for index, positions in enumerate(joint_positions):
+                positions = _real_array(positions, f"Joint configuration {index}").reshape(
+                    -1
                 )
-            if not np.all(np.isfinite(positions)):
-                raise ValueError(
-                    f"Joint configuration {index} contains non-finite values."
-                )
-            normalized_joint_positions.append(positions.copy())
+                if positions.shape != (self.N_JOINTS,):
+                    raise ValueError(
+                        f"Joint configuration {index} must contain exactly "
+                        f"{self.N_JOINTS} values."
+                    )
+                if not np.all(np.isfinite(positions)):
+                    raise ValueError(
+                        f"Joint configuration {index} contains non-finite values."
+                    )
+                normalized_joint_positions.append(positions.copy())
 
         if isinstance(observations[0], SE3):
             self.position_only = False
             self.OBS_SIZE = 6
             if not all(isinstance(observation, SE3) for observation in observations):
                 raise ValueError("All observations must have the same type.")
-            normalized_observations = []
-            for index, observation in enumerate(observations):
-                matrix = _real_array(observation.A, f"Pose observation {index}")
-                if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
-                    raise ValueError(
-                        f"Pose observation {index} must be a finite single SE3 pose."
-                    )
-                try:
-                    normalized_observations.append(_rigid_pose(matrix))
-                except ValueError as exc:
-                    raise ValueError(
-                        f"Pose observation {index} is not a valid SE3 pose."
-                    ) from exc
+            normalized_observations = _copy_pose_observations(observations)
+            if normalized_observations is None:
+                normalized_observations = []
+                for index, observation in enumerate(observations):
+                    matrix = _real_array(observation.A, f"Pose observation {index}")
+                    if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
+                        raise ValueError(
+                            f"Pose observation {index} must be a finite single SE3 pose."
+                        )
+                    try:
+                        normalized_observations.append(_rigid_pose(matrix))
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"Pose observation {index} is not a valid SE3 pose."
+                        ) from exc
         else:
             self.position_only = True
             self.OBS_SIZE = 3
@@ -1320,6 +1385,7 @@ class SerialRobotKineCal:
                 "Combined residual weights must remain positive and finite."
             )
         objective_scale = float(np.max(row_weights))
+        unit_row_weights = bool(np.all(row_weights == 1.0))
 
         for _ in range(max_iterations):
             residuals, regressor, position_errors, orientation_errors = (
@@ -1329,7 +1395,12 @@ class SerialRobotKineCal:
             weighted_residuals = row_weights[:, None] * residuals
 
             identifiable_parameter_indices = np.array(range(self.N_PARAMS))
-            regressor_rank = np.linalg.matrix_rank(weighted_regressor)
+            weighted_singular_values = np.linalg.svd(
+                weighted_regressor, compute_uv=False
+            )
+            regressor_rank = _rank_from_singular_values(
+                weighted_singular_values, weighted_regressor.shape
+            )
             if regressor_rank < len(identifiable_parameter_indices):
                 if (
                     self.position_only
@@ -1449,6 +1520,10 @@ class SerialRobotKineCal:
                 post_update_objective_norm,
                 objective_scale,
                 row_weights,
+                _raw_singular_values=(
+                    weighted_singular_values if unit_row_weights else None
+                ),
+                _weighted_singular_values=weighted_singular_values,
             )
             calibration_result.add_iteration_result(iteration_result)
 
