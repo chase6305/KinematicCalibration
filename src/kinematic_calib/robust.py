@@ -7,6 +7,7 @@ not an exact optimizer of the endpoint Huber objective or an uncertainty model.
 
 from dataclasses import dataclass, replace
 from typing import Callable
+from weakref import ref
 
 import numpy as np
 
@@ -131,24 +132,34 @@ def fit_huber_irls(
     The service has already converted known camera extrinsics into Base_T_EE.
     A fresh, geometrically identical nominal model is required on every pass.
     """
+    from robotkinecal import SerialRobotKineCal
+
     from .service import fit_dataset
 
     robust = options.robust
     inner_options = replace(options, robust=None)
     weights = np.ones(len(dataset.joint_positions))
-    # Retain references so object-id reuse after GC cannot defeat the fresh-model
-    # check. Calibration results from previous rounds are not retained.
+    # Track built-in pure POE identities without retaining their observations.
+    # Keep custom objects and external robot resources at their old lifetimes.
     previous_calibrators = []
     nominal = None
     trace = []
     outer_converged = False
     for iteration in range(robust.max_outer_iterations):
         calibrator = calibrator_factory()
-        if any(calibrator is previous for previous in previous_calibrators):
+        if calibrator is not None and any(
+            calibrator is previous() for previous in previous_calibrators
+        ):
             raise ValueError(
                 "calibrator_factory reused an existing object; every IRLS round requires a fresh nominal calibrator"
             )
-        previous_calibrators.append(calibrator)
+        if (
+            type(calibrator) is SerialRobotKineCal
+            and getattr(calibrator, "robot_model", None) is None
+        ):
+            previous_calibrators.append(ref(calibrator))
+        else:
+            previous_calibrators.append(lambda value=calibrator: value)
         signature = _nominal_signature(calibrator)
         if nominal is None:
             nominal = signature
