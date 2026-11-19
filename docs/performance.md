@@ -1,6 +1,6 @@
 # POE 求解与规划回归矩阵性能
 
-2026-11-19 的新增测量见 [SVD 复用与 Huber IRLS 内存](fit-performance.md)。
+2026-11-19 的新增测量见 [POE 拟合性能与内存](fit-performance.md)。
 
 2026-11-03 第二阶段先测量第一阶段参考实现，再引入批处理。
 `benchmarks/profile_solver.py` 固定随机种子 `20261103`，生成 6/7 自由度
