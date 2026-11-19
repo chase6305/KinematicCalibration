@@ -244,6 +244,56 @@ def test_max_outer_limit_does_not_claim_stable_huber_weights(monkeypatch):
     assert all(row["residual_multiplier"] == 1 for row in diagnostics["samples"])
 
 
+@pytest.mark.parametrize("max_outer_iterations", [1, 2, 4])
+def test_completed_inner_results_are_released_before_the_next_fit(
+    monkeypatch, max_outer_iterations
+):
+    import gc
+    import weakref
+
+    import kinematic_calib.service as service
+
+    previous = []
+
+    def inner_fit(dataset, calibrator, **kwargs):
+        gc.collect()
+        for fit_reference, snapshots in previous:
+            assert fit_reference() is None, "previous inner fit is still retained"
+            assert all(reference() is None for reference in snapshots), (
+                "previous iteration's regressor snapshots are still retained"
+            )
+        fitted = _stub_inner_fit(dataset, calibrator, **kwargs)
+        last = fitted.result.iteration_results[-1]
+        last.A_all = np.ones((18, 10))
+        last.weighted_A_all = last.A_all.copy()
+        previous.append(
+            (
+                weakref.ref(fitted),
+                [weakref.ref(last.A_all), weakref.ref(last.weighted_A_all)],
+            )
+        )
+        return fitted
+
+    monkeypatch.setattr(service, "fit_dataset", inner_fit)
+    fitted = fit_dataset(
+        _dataset(),
+        options=FitOptions(
+            robust=HuberOptions(
+                0.001, 0.002, max_outer_iterations=max_outer_iterations
+            )
+        ),
+        calibrator_factory=_one_joint_calibrator,
+    )
+
+    assert len(previous) == min(max_outer_iterations, 2)
+    last = fitted.result.iteration_results[-1]
+    assert previous[-1][1][0]() is last.A_all
+    assert previous[-1][1][1]() is last.weighted_A_all
+    assert fitted.robust_diagnostics["outer_converged"] == (
+        max_outer_iterations > 1
+    )
+
+
 def _contaminated_problem(seed, fraction):
     from scipy.spatial.transform import Rotation
 

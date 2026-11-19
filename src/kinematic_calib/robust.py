@@ -205,6 +205,9 @@ def fit_huber_irls(
             break
         if iteration + 1 < robust.max_outer_iterations:
             weights = proposed
+            # Release the previous round's regressor snapshots before the next
+            # inner solve allocates its own iteration results.
+            del fitted, last
     diagnostics = {
         "method": "sample-wise-huber-irls-heuristic",
         "residual_definition": "hypot(Euclidean endpoint position error / position_scale_m, SO(3) angle error / orientation_scale_rad)",
