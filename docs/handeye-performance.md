@@ -54,16 +54,21 @@ NumPy 1.26.4 / OpenCV 4.11.0，以及 NumPy 1.22.0 / OpenCV 4.8.0 各完成464�
 原生结果，覆盖激励门限、单次校验/单次分解和报告复用。测试不会把通过激励检查等同于
 原生方法在任意数据上均可成功求解。
 
-复现当前版本的完整调用计时：
+复现当前版本的完整调用计时：启动前检查可用内存、负载和相关进程；以下各组
+串行运行并全程持有跨对话排他锁。取锁失败时推迟基准，不绕过锁。
 
 ```bash
-OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 \
+flock -n -E 75 /home/ubuntu/.cache/codex-heavy-work.lock \
+  env -u PYTHONPATH OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 nice -n 10 \
   .venv/bin/python benchmarks/profile_handeye.py --samples 100 1000 \
   --workflows inspect solve compare bootstrap --repeats 5 \
   --output /tmp/handeye-profile.json
 
 # 留一分析成本更高，显式选择；每组还执行一次完整预热
-OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 \
+flock -n -E 75 /home/ubuntu/.cache/codex-heavy-work.lock \
+  env -u PYTHONPATH OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 nice -n 10 \
   .venv/bin/python benchmarks/profile_handeye.py --samples 1000 \
   --workflows influence --methods shah --repeats 3 \
   --output /tmp/handeye-influence.json
