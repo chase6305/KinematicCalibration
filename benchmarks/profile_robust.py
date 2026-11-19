@@ -16,6 +16,7 @@ import platform
 import resource
 import sys
 import time
+from importlib.metadata import version
 from pathlib import Path
 
 import numpy as np
@@ -135,6 +136,8 @@ def main():
         "python": sys.version,
         "numpy": np.__version__,
         "scipy": scipy.__version__,
+        "spatialmath": version("spatialmath-python"),
+        "benchmark_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "platform": platform.platform(),
         "cpu_affinity": sorted(os.sched_getaffinity(0)),
         "load_at_start": os.getloadavg(),
