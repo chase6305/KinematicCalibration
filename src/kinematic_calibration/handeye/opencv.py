@@ -257,7 +257,7 @@ def measure_handeye_motion(base_T_ee: np.ndarray) -> dict[str, float | int]:
     return _measure_validated_motion(poses, cv)
 
 
-def _measure_validated_motion(poses, cv):
+def _relative_rotation_vectors(poses, cv):
     reference_rotation = poses[0, :3, :3]
     relative_rotations = reference_rotation.T @ poses[1:, :3, :3]
     # Keep OpenCV's Rodrigues convention at zero and pi, with one output array
@@ -266,7 +266,12 @@ def _measure_validated_motion(poses, cv):
     jacobian = np.empty((9, 3))
     for rotation, vector in zip(relative_rotations, rotation_vectors, strict=True):
         cv.Rodrigues(rotation, dst=vector, jacobian=jacobian)
-    relative_rotation_vectors = rotation_vectors[:, :, 0]
+    return rotation_vectors[:, :, 0]
+
+
+def _measure_validated_motion(poses, cv, *, relative_rotation_vectors=None):
+    if relative_rotation_vectors is None:
+        relative_rotation_vectors = _relative_rotation_vectors(poses, cv)
     singular_values = np.linalg.svd(relative_rotation_vectors, compute_uv=False)
     rank_tolerance = (
         singular_values[0]
@@ -306,11 +311,17 @@ def solve_opencv_eye_to_hand(
     board_poses = _validate_pose_batch("camera_T_board", camera_T_board)
     if len(ee_poses) != len(board_poses):
         raise ValueError("base_T_ee and camera_T_board sample counts must match")
+    return _solve_validated_poses(ee_poses, board_poses, method=method, cv=cv)
+
+
+def _solve_validated_poses(ee_poses, board_poses, *, method, cv, excitation=None):
+    """Solve checked observations with optional checked motion diagnostics."""
     try:
         method_code = OPENCV_ROBOT_WORLD_METHODS[method]
     except KeyError as exc:
         raise ValueError(f"unsupported OpenCV robot-world method: {method}") from exc
-    excitation = _measure_validated_motion(ee_poses, cv)
+    if excitation is None:
+        excitation = _measure_validated_motion(ee_poses, cv)
     motion_rotation_rank = int(excitation["motion_rotation_rank"])
     max_rotation_from_first_rad = float(excitation["max_rotation_from_first_rad"])
     if motion_rotation_rank < 2 or max_rotation_from_first_rad < MIN_ROTATION_SPAN_RAD:
