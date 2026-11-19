@@ -273,3 +273,18 @@ def test_malformed_pose_container_cannot_hide_the_first_rigidity_error(count, fa
     assert str(error.value.__cause__) == "matrix must be a rigid SE(3) transform"
     assert model._observations == []
     assert model._joint_positions == []
+
+
+def test_valid_custom_pose_containers_keep_scalar_values_and_owned_copies():
+    from collections import UserList
+
+    model = make_model()
+    joints, poses = values(17)
+    observations = [SE3(pose, check=False) for pose in poses]
+    for observation in observations:
+        observation.data = UserList(observation.data)
+    model.set_observations(joints, observations)
+    np.testing.assert_array_equal(model._observation_array, poses)
+    for actual, original in zip(model._observations, observations, strict=True):
+        np.testing.assert_array_equal(actual.A, original.A)
+        assert not np.shares_memory(actual.A, original.A)
