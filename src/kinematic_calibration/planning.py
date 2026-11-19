@@ -11,6 +11,10 @@ import numpy as np
 
 from .backends.protocol import KinematicsBackend
 
+# Bound temporary work arrays during regressor construction and scoring while
+# retaining batched linear algebra. The full candidate regressor is kept once.
+_CANDIDATE_BATCH_SIZE = 1024
+
 
 @dataclass(frozen=True)
 class PoseSelection:
@@ -415,11 +419,15 @@ def _regressor_blocks(backend, configurations, characteristic_length_m):
     # model initialization for planning; no predicted pose becomes a measurement.
     first_pose = calibrator.forward_kinematics_batch(configurations[:1])[0]
     calibrator.set_observations(configurations[:1], [SE3(first_pose, check=False)])
-    regressor_blocks = calibrator.regressor_blocks(configurations)
-    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-        regressor_blocks[:, :3] /= characteristic_length_m
-    if not np.isfinite(regressor_blocks).all():
-        raise ValueError("characteristic length produces non-finite regressor rows")
+    regressor_blocks = np.empty((len(configurations), 6, calibrator.N_PARAMS))
+    for offset in range(0, len(configurations), _CANDIDATE_BATCH_SIZE):
+        rows = slice(offset, offset + _CANDIDATE_BATCH_SIZE)
+        blocks = calibrator.regressor_blocks(configurations[rows])
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            blocks[:, :3] /= characteristic_length_m
+        if not np.isfinite(blocks).all():
+            raise ValueError("characteristic length produces non-finite regressor rows")
+        regressor_blocks[rows] = blocks
     return regressor_blocks
 
 
@@ -449,6 +457,27 @@ def _pose_selection(configurations, selected_indices, blocks, characteristic_len
     )
 
 
+def _best_candidate(regressor_blocks, information_inverse, candidate_indices):
+    best_index = None
+    best_score = -np.inf
+    for offset in range(0, len(candidate_indices), _CANDIDATE_BATCH_SIZE):
+        indices = candidate_indices[offset : offset + _CANDIDATE_BATCH_SIZE]
+        blocks = regressor_blocks[indices]
+        score_matrices = np.eye(6) + (
+            blocks @ information_inverse @ blocks.transpose(0, 2, 1)
+        )
+        signs, scores = np.linalg.slogdet(score_matrices)
+        if np.any(signs <= 0) or not np.isfinite(scores).all():
+            raise ValueError("pose information score became numerically singular")
+        local_index = int(np.argmax(scores))
+        # Chunks retain candidate order. Strict comparison keeps the first
+        # maximum, including equal scores on opposite sides of a boundary.
+        if scores[local_index] > best_score:
+            best_score = scores[local_index]
+            best_index = int(indices[local_index])
+    return best_index
+
+
 def select_informative_poses(
     backend: KinematicsBackend,
     candidates: np.ndarray,
@@ -464,6 +493,8 @@ def select_informative_poses(
     Tikhonov regularization only for the greedy score. The reported rank and
     condition use the *unregularized* stacked selected regressor. Returned rows
     follow selection order; visit-order planning can reorder them separately.
+    Candidate work arrays use bounded batches; the full regressor is retained
+    once for reuse across greedy rounds.
     """
     configurations = _candidate_configurations(backend, candidates)
     count = _selection_count(count, len(configurations))
@@ -486,14 +517,9 @@ def select_informative_poses(
     selected_indices = []
     for _ in range(count):
         candidate_indices = np.flatnonzero(remaining)
-        available_blocks = regressor_blocks[candidate_indices]
-        score_matrices = np.eye(6) + (
-            available_blocks @ information_inverse @ available_blocks.transpose(0, 2, 1)
+        selected_index = _best_candidate(
+            regressor_blocks, information_inverse, candidate_indices
         )
-        signs, scores = np.linalg.slogdet(score_matrices)
-        if np.any(signs <= 0) or not np.isfinite(scores).all():
-            raise ValueError("pose information score became numerically singular")
-        selected_index = int(candidate_indices[np.argmax(scores)])
         selected_indices.append(selected_index)
         remaining[selected_index] = False
         selected_block = regressor_blocks[selected_index]

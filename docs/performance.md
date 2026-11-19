@@ -254,3 +254,51 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python \
   benchmarks/profile_handeye.py --samples 1000 --workflows influence \
   --methods shah --repeats 1 --output /tmp/handeye-influence-profile.json
 ```
+
+## 大候选池选姿的工作数组
+
+2026-11-19 对 `234ec74` 的完整公开 `select_informative_poses` 调用进行配对测量。
+回归矩阵构造和每轮评分现各按最多1024个候选分块，避免全候选规模的临时伴随矩阵、
+回归矩阵副本和评分矩阵。完整候选回归矩阵仍保留一份供各轮复用，故总内存仍随候选数
+和参数数线性增长；这不是流式或常数内存选姿算法。
+
+每块沿原候选行顺序评分，跨块仅在严格更大时替换最优值，保留首个并列最大值。
+每轮仍重新求解同一信息矩阵，最终仍对未正则化的选中回归矩阵做SVD；没有改变
+D-optimal目标、正则化、候选身份、输出顺序或秩/条件数定义。
+
+同机、Python3.10.0 / NumPy1.26.4 / SciPy1.15.3 / SpatialMath1.1.16，
+BLAS/OMP/MKL/NumExpr线程均为1。UR10候选使用seed20261103，在 `[-π,π]` 中均匀采样。
+同一进程导入前后两版选姿模块，七轮交替交换调用顺序，报告CPU中位耗时。
+计时包含输入校验、回归矩阵、全部贪心轮次、最终SVD及结果构造；导入、候选生成、
+完整调用预热、返回结果检查及访问排序在计时外。
+
+| 候选 / 选择 | 原CPU | 分块后CPU | 原分配峰值 | 分块后分配峰值 |
+| --- | --- | --- | --- | --- |
+| 400 / 40 | 8.79 ms | 8.88 ms | 1.90 MiB | 1.79 MiB |
+| 2000 / 80 | 68.48 ms | 69.14 ms | 9.41 MiB | 6.61 MiB |
+| 20000 / 120 | 1.369 s | 1.083 s | 93.88 MiB | 31.45 MiB |
+| 100000 / 40 | 2.796 s | 1.878 s | 469.32 MiB | 141.60 MiB |
+
+分配峰值由额外的一次完整调用用 `tracemalloc` 单独测量，输入候选和已有参考结果不计入，
+不是进程RSS，也不在计时调用中开启跟踪。小输入耗时基本持平；两组大输入CPU耗时改善
+1.26–1.49×，完整调用分配峰值减少约66–70%，不把此倍率推广到任意模型和规模。
+计时中的全部返回字段逐项一致，包括选中索引、关节角、奇异值、秩和条件数。
+
+另以1/2/6/7/11自由度、任意转轴和固定变换、分块边界、不同内存布局/实数类型、重复行
+及极端缩放/正则化共365组对照：350组成功结果的全部字段完全相同，15组失败的异常
+类型和说明相同。提交的回归测试另用标量回归矩阵和完整参数空间行列式独立核对选姿，
+覆盖边界两侧、跨块并列最大值、批次上限及任意块的无效评分。
+
+原始交错记录与数值审计保存在本次会话 `/tmp/kincal-selection-paired-chunked.json`
+及 `/tmp/kincal-selection-behavior-audit.json`。复现当前版本的完整选姿/排序与分配测量：
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 \
+  .venv/bin/python benchmarks/profile_planning.py \
+  --cases 400:40 2000:80 20000:120 100000:40 --repeats 7 --memory \
+  --output /tmp/pose-selection-profile.json
+```
+
+基准JSON保留每次CPU/wall耗时、选中/访问索引、诊断、源码哈希、依赖版本、线程环境、
+CPU affinity及启动时load average。`--memory` 只用于选姿模式，跟踪调用也核对选中索引
+和奇异值；正常计时不包含跟踪开销。
