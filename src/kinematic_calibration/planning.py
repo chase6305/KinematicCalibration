@@ -460,10 +460,17 @@ def _pose_selection(configurations, selected_indices, blocks, characteristic_len
 def _best_candidate(regressor_blocks, information_inverse, candidate_indices):
     best_index = None
     best_score = -np.inf
+    score_identity = np.eye(6)
     for offset in range(0, len(candidate_indices), _CANDIDATE_BATCH_SIZE):
         indices = candidate_indices[offset : offset + _CANDIDATE_BATCH_SIZE]
-        blocks = regressor_blocks[indices]
-        score_matrices = np.eye(6) + (
+        first, stop = indices[0], indices[-1] + 1
+        # Before selections leave gaps in a chunk, borrow its contiguous rows.
+        blocks = (
+            regressor_blocks[first:stop]
+            if stop - first == len(indices)
+            else regressor_blocks[indices]
+        )
+        score_matrices = score_identity + (
             blocks @ information_inverse @ blocks.transpose(0, 2, 1)
         )
         signs, scores = np.linalg.slogdet(score_matrices)

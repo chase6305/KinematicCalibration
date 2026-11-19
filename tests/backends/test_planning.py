@@ -180,6 +180,7 @@ def test_scoring_bounds_batch_size_and_preserves_ties_across_boundaries(monkeypa
     # The winners span multiple chunks; equal scores retain original row order.
     blocks[[1023, 1024, 2052]] *= 2
     original_blocks = blocks.copy()
+    blocks.setflags(write=False)
     monkeypatch.setattr(planning, "_regressor_blocks", lambda *args: blocks)
     slogdet = np.linalg.slogdet
     batch_sizes = []
