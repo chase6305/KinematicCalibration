@@ -246,3 +246,30 @@ def test_the_last_partial_batch_cannot_hide_an_invalid_pose():
         ValueError, match="Pose observation 1024 must be a finite single SE3 pose"
     ):
         model.set_observations(joints, observations)
+
+
+@pytest.mark.parametrize("count", [17, 1025])
+@pytest.mark.parametrize("fault", ["missing", "none", "empty", "custom"])
+def test_malformed_pose_container_cannot_hide_the_first_rigidity_error(count, fault):
+    class UnexpectedContainer:
+        def __len__(self):
+            raise RuntimeError("later container should not be accessed")
+
+    model = make_model()
+    observations = [SE3(np.eye(4), check=False) for _ in range(count)]
+    observations[1].A[0, 0] = 2
+    if fault == "missing":
+        del observations[-1].data
+    elif fault == "none":
+        observations[-1].data = None
+    elif fault == "empty":
+        observations[-1].data = []
+    else:
+        observations[-1].data = UnexpectedContainer()
+    with pytest.raises(
+        ValueError, match="Pose observation 1 is not a valid SE3 pose"
+    ) as error:
+        model.set_observations(np.zeros((count, 3)), observations)
+    assert str(error.value.__cause__) == "matrix must be a rigid SE(3) transform"
+    assert model._observations == []
+    assert model._joint_positions == []

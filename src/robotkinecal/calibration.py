@@ -48,7 +48,14 @@ def _copy_pose_observations(observations):
         != {"divide": "warn", "over": "warn", "under": "ignore", "invalid": "warn"}
     ):
         return None
-    if not all(type(observation) is SE3 for observation in observations):
+    # An unusual internal container can raise from A before an earlier pose's
+    # scalar error has been reported. Leave those objects to the scalar loop.
+    if not all(
+        type(observation) is SE3
+        and type(getattr(observation, "data", None)) is list
+        and len(observation.data) == 1
+        for observation in observations
+    ):
         return None
     # Certify only the interior of the 1e-12 scalar tolerance. Boundary and
     # invalid inputs retain the scalar validator, error order and causes.
