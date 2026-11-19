@@ -15,6 +15,8 @@ For routing alone, including 6/7 DOF and implicit/open/closed starts::
 
 Imports, candidate generation, warmup and validation are outside timed calls.
 Explicit starts use zero joint angles; distances are joint-space radians.
+``--memory`` measures selection's peak traced allocations in a separate call,
+outside the timings; candidate inputs are allocated before tracing starts.
 """
 
 import argparse
@@ -24,6 +26,7 @@ import os
 import platform
 import statistics
 import time
+import tracemalloc
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
@@ -47,7 +50,7 @@ def _case(text):
     return candidates, selected
 
 
-def measure_case(backend, candidate_count, selected_count, seed, repeats):
+def measure_case(backend, candidate_count, selected_count, seed, repeats, memory=False):
     limits = backend.joint_limits
     candidates = np.random.default_rng(seed).uniform(
         np.maximum(limits[:, 0], -np.pi),
@@ -55,21 +58,29 @@ def measure_case(backend, candidate_count, selected_count, seed, repeats):
         (candidate_count, backend.dof),
     )
     start_configuration = np.zeros(backend.dof)
-    warmup = planning.select_informative_poses(backend, candidates[:1], count=1)
+    warmup = planning.select_informative_poses(
+        backend, candidates, count=selected_count
+    )
     routing.plan_visit_order(warmup.joint_positions)
     runs = []
     for _ in range(repeats):
-        started = time.perf_counter()
+        started, cpu_started = time.perf_counter(), time.process_time()
         selected = planning.select_informative_poses(
             backend, candidates, count=selected_count
         )
         selection_seconds = time.perf_counter() - started
+        selection_cpu_seconds = time.process_time() - cpu_started
         original_positions = selected.joint_positions.copy()
-        started = time.perf_counter()
+        started, cpu_started = time.perf_counter(), time.process_time()
         visits = routing.plan_visit_order(
             selected.joint_positions, start_configuration=start_configuration
         )
         routing_seconds = time.perf_counter() - started
+        routing_cpu_seconds = time.process_time() - cpu_started
+        np.testing.assert_array_equal(
+            selected.candidate_indices, warmup.candidate_indices
+        )
+        np.testing.assert_array_equal(selected.singular_values, warmup.singular_values)
         visited_candidates = selected.candidate_indices[visits.indices]
         np.testing.assert_array_equal(selected.joint_positions, original_positions)
         np.testing.assert_array_equal(
@@ -88,7 +99,9 @@ def measure_case(backend, candidate_count, selected_count, seed, repeats):
         runs.append(
             {
                 "selection_wall_seconds": selection_seconds,
+                "selection_cpu_seconds": selection_cpu_seconds,
                 "routing_wall_seconds": routing_seconds,
+                "routing_cpu_seconds": routing_cpu_seconds,
                 "initial_distance_rad": visits.initial_distance_rad,
                 "total_distance_rad": visits.total_distance_rad,
                 "rank": selected.rank,
@@ -100,17 +113,38 @@ def measure_case(backend, candidate_count, selected_count, seed, repeats):
                 "information_set_unchanged": True,
             }
         )
-    return {
+    result = {
         "candidate_count": candidate_count,
         "selected_count": selected_count,
         "median_selection_wall_seconds": statistics.median(
             row["selection_wall_seconds"] for row in runs
         ),
+        "median_selection_cpu_seconds": statistics.median(
+            row["selection_cpu_seconds"] for row in runs
+        ),
         "median_routing_wall_seconds": statistics.median(
             row["routing_wall_seconds"] for row in runs
         ),
+        "median_routing_cpu_seconds": statistics.median(
+            row["routing_cpu_seconds"] for row in runs
+        ),
         "runs": runs,
     }
+    if memory:
+        tracemalloc.start()
+        try:
+            measured = planning.select_informative_poses(
+                backend, candidates, count=selected_count
+            )
+            _, peak_bytes = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        np.testing.assert_array_equal(
+            measured.candidate_indices, warmup.candidate_indices
+        )
+        np.testing.assert_array_equal(measured.singular_values, warmup.singular_values)
+        result["selection_peak_traced_bytes"] = peak_bytes
+    return result
 
 
 def measure_route_case(route_count, dof, mode, seed, repeats):
@@ -194,8 +228,17 @@ def metadata():
         },
         "blas_threads_env": {
             name: os.environ.get(name)
-            for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")
+            for name in (
+                "OPENBLAS_NUM_THREADS",
+                "OMP_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS",
+            )
         },
+        "cpu_affinity": sorted(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else None,
+        "load_average_at_start": os.getloadavg() if hasattr(os, "getloadavg") else None,
         "timing_scope": "selection and routing separately; imports, warmup, candidate generation and validation excluded",
         "start_configuration_rad": [0.0] * 6,
         "return_to_start": False,
@@ -216,12 +259,21 @@ def main():
     )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--seed", type=int, default=20261103)
+    parser.add_argument(
+        "--memory",
+        action="store_true",
+        help="measure selection's peak traced allocations in an extra untimed call",
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.repeats < 1 or args.seed < 0:
         parser.error("repeats must be positive and seed must be non-negative")
     if args.route_counts is not None and min(args.route_counts) < 1:
         parser.error("route counts must be positive")
+    if args.memory and args.route_counts is not None:
+        parser.error(
+            "--memory measures selection; use --cases instead of --route-counts"
+        )
     report = {
         "metadata": metadata(),
         "seed": args.seed,
@@ -235,7 +287,9 @@ def main():
                 "joint_positions_rad": "uniform[-3,3], seed + route_count + dof",
                 "start_configuration_rad": "none for implicit_open; zero vector otherwise",
                 "return_to_start": "true for explicit_closed only",
-                "load_average_at_start": os.getloadavg() if hasattr(os, "getloadavg") else None,
+                "load_average_at_start": os.getloadavg()
+                if hasattr(os, "getloadavg")
+                else None,
             }
         )
         cases = (
@@ -245,9 +299,24 @@ def main():
             for mode in ("implicit_open", "explicit_open", "explicit_closed")
         )
     else:
+        report["metadata"]["memory_scope"] = (
+            (
+                "peak tracemalloc allocations in a separate full selection call; "
+                "candidate inputs excluded; not process RSS"
+            )
+            if args.memory
+            else None
+        )
         backend = NumpyBackend.from_urdf(example_urdf(), end_link="ee_link")
         cases = (
-            measure_case(backend, candidate_count, selected_count, args.seed, args.repeats)
+            measure_case(
+                backend,
+                candidate_count,
+                selected_count,
+                args.seed,
+                args.repeats,
+                memory=args.memory,
+            )
             for candidate_count, selected_count in args.cases
         )
     for case in cases:
