@@ -90,6 +90,9 @@ opencv-handeye-calib export --samples handeye_observations.npz --result handeye.
 
 同样保留 `inspect`、`compare`、`influence`、`bootstrap` 诊断命令。归档契约、候选姿态索引、内容指纹和结果验证随实现移植；旧项目产生的结果文件由于实现指纹不同，需要从原观察 NPZ 重新求解。CLI 报告中的 `accepted` 仅表示配置的闭环质量阈值通过。
 
+重复求解的实现与测量范围见 [手眼性能](handeye-performance.md)，包含完整 CLI 的
+bootstrap、留一分析、数值一致性和复现命令。
+
 所有写入命令均检查来源路径和已有输出，`--force` 不能覆盖输入样本。空或截断NPZ返回
 简洁错误。`export` 先准备两个NPY，再发布到各自目录；普通失败或Python中断恢复原配对，
 支持不同目录和文件系统，不保证进程崩溃时两个文件一起完成。

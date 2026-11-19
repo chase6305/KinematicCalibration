@@ -201,6 +201,13 @@ def evaluate_eye_to_hand_solution(
     board_poses = _validate_pose_batch("camera_T_board", camera_T_board)
     if len(ee_poses) != len(board_poses):
         raise ValueError("base_T_ee and camera_T_board sample counts must match")
+    return _evaluate_validated_poses(
+        ee_poses, board_poses, base_T_camera, ee_T_board
+    )
+
+
+def _evaluate_validated_poses(ee_poses, board_poses, base_T_camera, ee_T_board):
+    """Evaluate checked pose arrays, still validating the solution transforms."""
     solutions = []
     for name, value in (
         ("Base_T_Camera", base_T_camera),
@@ -247,20 +254,33 @@ def measure_handeye_motion(base_T_ee: np.ndarray) -> dict[str, float | int]:
     """Measure translational and rotational excitation of EE observations."""
     cv = _require_opencv()
     poses = _validate_pose_batch("base_T_ee", base_T_ee)
-    relative_rotation_vectors = []
+    return _measure_validated_motion(poses, cv)
+
+
+def _measure_validated_motion(poses, cv):
     reference_rotation = poses[0, :3, :3]
-    for pose in poses[1:]:
-        relative_rotation = reference_rotation.T @ pose[:3, :3]
-        rotation_vector, _ = cv.Rodrigues(relative_rotation)
-        relative_rotation_vectors.append(rotation_vector.reshape(3))
-    relative_rotation_vectors = np.asarray(relative_rotation_vectors)
+    relative_rotations = reference_rotation.T @ poses[1:, :3, :3]
+    # Keep OpenCV's Rodrigues convention at zero and pi, with one output array
+    # and a reused Jacobian instead of one retained array object per rotation.
+    rotation_vectors = np.empty((len(relative_rotations), 3, 1))
+    jacobian = np.empty((9, 3))
+    for rotation, vector in zip(relative_rotations, rotation_vectors, strict=True):
+        cv.Rodrigues(rotation, dst=vector, jacobian=jacobian)
+    relative_rotation_vectors = rotation_vectors[:, :, 0]
     singular_values = np.linalg.svd(relative_rotation_vectors, compute_uv=False)
+    rank_tolerance = (
+        singular_values[0]
+        * max(relative_rotation_vectors.shape)
+        * np.finfo(singular_values.dtype).eps
+    )
     largest = float(singular_values[0])
     second = float(singular_values[1])
     translations = poses[:, :3, 3]
     translation_span = translations.max(axis=0) - translations.min(axis=0)
     return {
-        "motion_rotation_rank": int(np.linalg.matrix_rank(relative_rotation_vectors)),
+        "motion_rotation_rank": int(
+            np.count_nonzero(singular_values > rank_tolerance)
+        ),
         "rotation_singular_value_1_rad": largest,
         "rotation_singular_value_2_rad": second,
         "rotation_direction_ratio": second / largest if largest > 0.0 else 0.0,
@@ -290,7 +310,7 @@ def solve_opencv_eye_to_hand(
         method_code = OPENCV_ROBOT_WORLD_METHODS[method]
     except KeyError as exc:
         raise ValueError(f"unsupported OpenCV robot-world method: {method}") from exc
-    excitation = measure_handeye_motion(ee_poses)
+    excitation = _measure_validated_motion(ee_poses, cv)
     motion_rotation_rank = int(excitation["motion_rotation_rank"])
     max_rotation_from_first_rad = float(excitation["max_rotation_from_first_rad"])
     if motion_rotation_rank < 2 or max_rotation_from_first_rad < MIN_ROTATION_SPAN_RAD:
@@ -310,10 +330,10 @@ def solve_opencv_eye_to_hand(
     try:
         r_ee_T_board, t_ee_T_board, r_base_T_camera, t_base_T_camera = (
             cv.calibrateRobotWorldHandEye(
-                [pose[:3, :3] for pose in ee_poses],
-                [pose[:3, 3] for pose in ee_poses],
-                [pose[:3, :3] for pose in board_poses],
-                [pose[:3, 3] for pose in board_poses],
+                ee_poses[:, :3, :3],
+                ee_poses[:, :3, 3],
+                board_poses[:, :3, :3],
+                board_poses[:, :3, 3],
                 method=method_code,
             )
         )
@@ -322,7 +342,7 @@ def solve_opencv_eye_to_hand(
 
     ee_T_board = _transform(r_ee_T_board, t_ee_T_board)
     base_T_camera = _transform(r_base_T_camera, t_base_T_camera)
-    metrics = evaluate_eye_to_hand_solution(
+    metrics = _evaluate_validated_poses(
         ee_poses, board_poses, base_T_camera, ee_T_board
     )
     return OpenCVEyeToHandResult(

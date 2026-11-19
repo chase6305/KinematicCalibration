@@ -179,7 +179,6 @@ def _solve(args: argparse.Namespace) -> int:
         observations.camera_T_board,
         method=args.method,
     )
-    excitation = measure_handeye_motion(observations.base_T_ee)
     failures = []
     if result.position_error_max_m > args.max_position_error:
         failures.append("maximum hand-eye position error exceeds threshold")
@@ -213,9 +212,9 @@ def _solve(args: argparse.Namespace) -> int:
         "orientation_error_max_rad": result.orientation_error_max_rad,
         "motion_rotation_rank": result.motion_rotation_rank,
         "max_rotation_from_first_rad": result.max_rotation_from_first_rad,
-        "rotation_singular_value_1_rad": excitation["rotation_singular_value_1_rad"],
-        "rotation_singular_value_2_rad": excitation["rotation_singular_value_2_rad"],
-        "rotation_direction_ratio": excitation["rotation_direction_ratio"],
+        "rotation_singular_value_1_rad": result.rotation_singular_value_1_rad,
+        "rotation_singular_value_2_rad": result.rotation_singular_value_2_rad,
+        "rotation_direction_ratio": result.rotation_direction_ratio,
         "position_error_worst_candidate_index": int(
             observations.candidate_indices[np.argmax(result.position_errors_m)]
         ),
